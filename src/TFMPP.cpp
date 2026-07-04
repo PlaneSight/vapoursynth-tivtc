@@ -1995,7 +1995,8 @@ TFMPP::TFMPP(VSNodeRef *_child, int _PP, int _mthresh, const char* _ovr, bool _d
     }
   }
 emptyovrFM:
-  mmask = vsapi->newVideoFrame(vi->format, vi->width, vi->height, nullptr, core);
+  const VSFormat *mask_format = vsapi->registerFormat(vi->format->colorFamily, stInteger, 8, vi->format->subSamplingW, vi->format->subSamplingH, core);
+  mmask = vsapi->newVideoFrame(mask_format, vi->width, vi->height, nullptr, core);
 }
 
 TFMPP::~TFMPP()

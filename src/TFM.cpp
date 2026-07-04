@@ -2851,11 +2851,12 @@ TFM::TFM(VSNodeRef *_child, int _order, int _field, int _mode, int _PP, const ch
     if (!cArray) {
         throw TIVTCError("TFM:  malloc failure (cArray)!");
     }
-    cmask = decltype(cmask) (vsapi->newVideoFrame(vi->format, vi->width, vi->height, nullptr, core), vsapi->freeFrame);
+    const VSFormat *mask_format = vsapi->registerFormat(vi->format->colorFamily, stInteger, 8, vi->format->subSamplingW, vi->format->subSamplingH, core);
+    cmask = decltype(cmask) (vsapi->newVideoFrame(mask_format, vi->width, vi->height, nullptr, core), vsapi->freeFrame);
   }
 
   // prepare map format: always 8 bits
-  const VSFormat *map_format = vsapi->registerFormat(vi->format->colorFamily, vi->format->sampleType, 8, vi->format->subSamplingW, vi->format->subSamplingH, core);
+  const VSFormat *map_format = vsapi->registerFormat(vi->format->colorFamily, stInteger, 8, vi->format->subSamplingW, vi->format->subSamplingH, core);
   map = decltype(map) (vsapi->newVideoFrame(map_format, vi->width, vi->height, nullptr, core), vsapi->freeFrame);
 
   if (d2v.size())
