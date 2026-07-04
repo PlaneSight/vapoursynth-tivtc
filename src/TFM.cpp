@@ -635,7 +635,7 @@ void TFM::writeDisplay(VSFrameRef *dst, int n, int fmatch, int combed, bool over
     if (micout == 1 && mics[0] != -20 && mics[1] != -20 && mics[2] != -20 && micmatching == 0)
     {
       snprintf(buf, SZ, "MICS:  p = %d  c = %d  n = %d\n", mics[0], mics[1], mics[2]);
-      text + buf;
+      text += buf;
     }
     else if ((micout == 2 && mics[0] != -20 && mics[1] != -20 && mics[2] != -20 &&
       mics[3] != -20 && mics[4] != -20) || micmatching > 0)
