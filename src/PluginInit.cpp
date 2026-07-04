@@ -293,11 +293,10 @@ static void VS_CC tfmCreate(const VSMap *in, VSMap *out, void *userData, VSCore 
         return;
     }
 
-    int filter_mode = fmParallelRequests; /// It's possible fmParallel could be used in some situations. Study the matter.
+    int filter_mode = fmSerial; /// TFM has shared scratch buffers (cArray, tbuffer, cmask, map) and mutable tracking state (lastMatch, sclast) that are not thread-safe. Must be serialized for deterministic output.
     int filter_flags = 0;
     if (mode == 7) {
-        // mode 7 requires linear access to function correctly.
-        filter_mode = fmSerial;
+        // mode 7 also requires linear access to function correctly.
         filter_flags = nfMakeLinear;
     }
     vsapi->createFilter(in, out, "TFM", tfmInit, tfmGetFrame, tfmFree, filter_mode, filter_flags, tfm_data, core);
