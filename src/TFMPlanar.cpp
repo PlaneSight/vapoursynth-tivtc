@@ -259,11 +259,40 @@ bool TFM::checkCombedPlanar(const VSFrameRef *src, int n, int match,
   const int bits_per_pixel = vi->format->bitsPerSample;
   if (vi->format->bytesPerSample == 1) {
     checkCombedPlanarAnalyze_core<uint8_t>(vi, cthresh, _chroma, &cpuFlags, metric, src, cmask.get(), vsapi);
+    applyY0Y1Exclusion(cmask.get(), vsapi);
     return checkCombedPlanar_core<uint8_t>(src, n, match, blockN, xblocksi, mics, ddebug, bits_per_pixel);
   }
   else {
     checkCombedPlanarAnalyze_core<uint16_t>(vi, cthresh, _chroma, &cpuFlags, metric, src, cmask.get(), vsapi);
+    applyY0Y1Exclusion(cmask.get(), vsapi);
     return checkCombedPlanar_core<uint16_t>(src, n, match, blockN, xblocksi, mics, ddebug, bits_per_pixel);
+  }
+}
+
+void TFM::applyY0Y1Exclusion(VSFrameRef *cmask, const VSAPI *vsapi) const
+{
+  if (y0 == 0 && y1 == 0) return;
+
+  const int np = vi->format->numPlanes;
+
+  for (int b = 0; b < np; ++b)
+  {
+    const int cmk_pitch = vsapi->getStride(cmask, b);
+    uint8_t *cmkp = vsapi->getWritePtr(cmask, b);
+
+    int y0_plane = y0;
+    int y1_plane = y1;
+
+    // adjust for chroma vertical subsampling
+    if (b > 0 && vi->format->subSamplingH > 0) {
+      y0_plane = std::max(0, y0 >> vi->format->subSamplingH);
+      y1_plane = std::max(0, y1 >> vi->format->subSamplingH);
+    }
+
+    y1_plane = std::min(y1_plane, vsapi->getFrameHeight(cmask, b));
+
+    for (int y = y0_plane; y < y1_plane; ++y)
+      memset(cmkp + y * cmk_pitch, 0, cmk_pitch);
   }
 }
 
