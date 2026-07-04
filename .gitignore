@@ -5,3 +5,6 @@ build/
 *.dylib
 *.dll
 *.so
+.zig-cache/
+zig-out/
+zig-pkg/
