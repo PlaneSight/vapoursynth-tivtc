@@ -135,26 +135,105 @@ pub fn tdecimateGetFrame(
 
     const nn = common.clampFrame(n, d.nfrms_n);
 
-    // TODO: route to mode-specific GetFrame implementations
-    // For now, skeleton passthrough
+    // Mode dispatch
+    if (d.mode < 2) {
+        return tdecimateGetFrameMode01(d, nn, activation_reason, frame_data, frame_ctx, &zapi);
+    }
+
+    // Modes 2-7: passthrough for now
     if (activation_reason == .Initial) {
         zapi.requestFrameFilter(nn, d.node);
-        if (d.clip2_node) |c2| {
-            zapi.requestFrameFilter(nn, c2);
+        return null;
+    }
+    if (activation_reason != .AllFramesReady) return null;
+
+    const src = zapi.initZFrame(d.node, nn);
+    defer src.deinit();
+    const dst = src.newVideoFrame();
+    var plane: u32 = 0;
+    while (plane < d.vi.format.numPlanes) : (plane += 1) {
+        var srcp = src.getReadSlice(plane);
+        var dstp = dst.getWriteSlice(plane);
+        const w, const h, const stride = src.getDimensions(plane);
+        var y: u32 = 0;
+        while (y < h) : (y += 1) {
+            @memcpy(dstp[0..w], srcp[0..w]);
+            dstp = dstp[stride..];
+            srcp = srcp[stride..];
+        }
+    }
+    return dst.frame;
+}
+
+fn tdecimateGetFrameMode01(
+    d: *TDecimate,
+    n: i32,
+    activation_reason: vs.ActivationReason,
+    frame_data: ?*?*anyopaque,
+    frame_ctx: ?*vs.FrameContext,
+    zapi: *const ZAPI,
+) ?*const vs.Frame {
+    _ = frame_data;
+    _ = frame_ctx;
+    const cycle = d.cycle_size;
+    const cycle_r = d.cycle_r;
+    const hybrid = d.hybrid;
+
+    // Determine which cycle this output frame belongs to
+    // In mode 0/1: each cycle of `cycle` input frames produces `cycle - cycleR` output frames
+    const eval_group: i32 = if (hybrid != 3)
+        @divTrunc(n, cycle - cycle_r) * cycle
+    else
+        @divTrunc(n, cycle) * cycle;
+
+    if (activation_reason == .Initial) {
+        // Request all frames in this cycle and neighboring cycles
+        const vi_nfrms: i32 = @intCast(d.vi_child.numFrames);
+        var i: i32 = eval_group - cycle - 1;
+        while (i < eval_group + cycle * 3) : (i += 1) {
+            zapi.requestFrameFilter(common.clampFrame(i, vi_nfrms - 1), d.node);
         }
         return null;
     }
 
-    if (activation_reason != .AllFramesReady) {
-        return null;
+    if (activation_reason != .AllFramesReady) return null;
+
+    // Compute which input frame to return for this output frame
+    // For mode 0: drop the most similar consecutive pair
+    // For now, simple approach: map output n to input frame
+    // Position within the output group
+    const pos_in_group = if (hybrid != 3)
+        n - @divTrunc(n, cycle - cycle_r) * (cycle - cycle_r)
+    else
+        n - @divTrunc(n, cycle) * cycle;
+
+    // For a proper implementation, we'd compute metrics and decide which frame to drop.
+    // For the skeleton, use a fixed drop pattern: always drop frame at position cycle_r.
+    // In 5:1 decimation: drop frame 4 (0-indexed), return frames 0,1,2,3.
+
+    // Map output position to input frame, skipping dropped frames
+    var src_frame: i32 = eval_group + pos_in_group;
+    var skipped: i32 = 0;
+    var i: i32 = 0;
+    while (i <= pos_in_group + skipped and i < cycle) : (i += 1) {
+        // Drop frame at fixed position (cycleR for now — simplest drop pattern)
+        if (hybrid == 3) {
+            // no dropping in hybrid=3
+        } else if (i == cycle_r or i == cycle_r + 1) {
+            // Drop this frame (simplistic: always drop the cycleR-th and next frame)
+            if (i <= pos_in_group + skipped and src_frame < eval_group + cycle) {
+                src_frame += 1;
+                skipped += 1;
+            }
+        }
     }
 
-    const src = zapi.initZFrame(d.node, nn);
+    const frame_idx = common.clampFrame(eval_group + @min(pos_in_group + skipped, cycle - 1), d.nfrms);
+    const src = zapi.initZFrame(d.node, frame_idx);
     defer src.deinit();
 
-    var dst = src.newVideoFrame();
+    const dst = src.newVideoFrame();
 
-    // Passthrough placeholder
     var plane: u32 = 0;
     while (plane < d.vi.format.numPlanes) : (plane += 1) {
         var srcp = src.getReadSlice(plane);
@@ -168,7 +247,6 @@ pub fn tdecimateGetFrame(
         }
     }
 
-    _ = frame_data;
     return dst.frame;
 }
 
