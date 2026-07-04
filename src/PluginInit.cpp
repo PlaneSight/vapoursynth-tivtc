@@ -569,22 +569,22 @@ static void VS_CC tdecimateCreate(const VSMap *in, VSMap *out, void *userData, V
     int filter_modes[8] = {
         fmParallelRequests,
         fmParallelRequests,
-        fmUnordered, // Either fmUnordered or fmParallelRequests. I figured out which one but I didn't write it down and forgot.
+        fmSerial, // mode 2 needs serial access for its state machine
         fmSerial,
         fmParallel,
         fmParallel,
         fmParallel,
-        fmUnordered
+        fmSerial // mode 7 also tracks state across frames
     };
     int filter_flags[8] = {
         0,
         0,
-        0,
+        nfMakeLinear,
         nfMakeLinear,
         0,
         0,
         0,
-        0
+        nfMakeLinear
     };
 
     vsapi->createFilter(in, out, "TDecimate", tdecimateInit, tdecimateGetFrame, tdecimateFree, filter_modes[mode], filter_flags[mode], tdecimate_data, core);
