@@ -14,6 +14,7 @@ warnings = [
 cflags = [
   warnings,
   '-fvisibility=hidden',
+  '-I' + meson.source_root() + '/vendor/include',
 ]
 
 ldflags = [
