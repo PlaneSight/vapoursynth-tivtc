@@ -21,7 +21,7 @@ const tdm_core = @import("tdecimate_core.zig");
 pub const TDecimate = struct {
     alloc: std.mem.Allocator,
     node: ?*vs.Node,
-    vi: *const vs.VideoInfo,
+    vi: vs.VideoInfo,
     vi_child: *const vs.VideoInfo,
 
     // --- Filter parameters ---
@@ -118,6 +118,64 @@ pub const TDecimate = struct {
     ovr_array: std.ArrayListUnmanaged(u8),
 };
 
+const Fps = struct { num: i64, den: i64 };
+
+fn gcdI64(a_in: i64, b_in: i64) i64 {
+    var a: i64 = @intCast(@abs(a_in));
+    var b: i64 = @intCast(@abs(b_in));
+    while (b != 0) {
+        const t = @mod(a, b);
+        a = b;
+        b = t;
+    }
+    return if (a == 0) 1 else a;
+}
+
+fn reduceFps(num_in: i64, den_in: i64) Fps {
+    var num = num_in;
+    var den = den_in;
+    if (den < 0) {
+        num = -num;
+        den = -den;
+    }
+    const g = gcdI64(num, den);
+    return .{ .num = @divTrunc(num, g), .den = @divTrunc(den, g) };
+}
+
+fn mulDivFps(num: i64, den: i64, mul: i64, div: i64) Fps {
+    return reduceFps(num * mul, den * div);
+}
+
+fn fpsFromFloat(rate: f64) Fps {
+    const ntsc = [_]Fps{
+        .{ .num = 24000, .den = 1001 },
+        .{ .num = 30000, .den = 1001 },
+        .{ .num = 60000, .den = 1001 },
+        .{ .num = 120000, .den = 1001 },
+    };
+    for (ntsc) |fps| {
+        const value = @as(f64, @floatFromInt(fps.num)) / @as(f64, @floatFromInt(fps.den));
+        if (@abs(rate - value) < 0.0001) return fps;
+    }
+
+    const rounded = @round(rate);
+    if (@abs(rate - rounded) < 0.000001) {
+        return .{ .num = @intFromFloat(rounded), .den = 1 };
+    }
+
+    const den: i64 = 1_000_000;
+    return reduceFps(@intFromFloat(@round(rate * @as(f64, @floatFromInt(den)))), den);
+}
+
+fn copyOutputFrame(zapi: *const ZAPI, src: anytype, original_frame: i32, fps_num: i64, fps_den: i64) ?*const vs.Frame {
+    const dst = src.copyFrame();
+    const props = zapi.getFramePropertiesRW(dst.frame) orelse return dst.frame;
+    _ = zapi.vsapi.mapSetInt.?(props, common.PROP_TDECIMATE_ORIGINAL_FRAME, @intCast(original_frame), .Replace);
+    _ = zapi.vsapi.mapSetInt.?(props, common.PROP_DURATION_NUM, fps_den, .Replace);
+    _ = zapi.vsapi.mapSetInt.?(props, common.PROP_DURATION_DEN, fps_num, .Replace);
+    return dst.frame;
+}
+
 // ---------------------------------------------------------------------------
 // GetFrame callback
 // ---------------------------------------------------------------------------
@@ -163,7 +221,7 @@ pub fn tdecimateGetFrame(
     const idx = common.clampFrame(src_n, d.nfrms);
     const src = zapi.initZFrame(d.node, idx);
     defer src.deinit();
-    return src.addFrameRef().frame;
+    return copyOutputFrame(&zapi, src, idx, d.vi.fpsNum, d.vi.fpsDen);
 }
 
 fn tdecimateGetFrameMode01(
@@ -289,7 +347,7 @@ fn tdecimateGetFrameMode01(
     const src = zapi.initZFrame(d.node, frame_idx);
     defer src.deinit();
 
-    return src.addFrameRef().frame;
+    return copyOutputFrame(zapi, src, frame_idx, d.vi.fpsNum, d.vi.fpsDen);
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +384,7 @@ fn tdecimateGetFrameMode2(
 
     const src = zapi.initZFrame(d.node, frame_idx);
     defer src.deinit();
-    return src.addFrameRef().frame;
+    return copyOutputFrame(zapi, src, frame_idx, d.vi.fpsNum, d.vi.fpsDen);
 }
 
 // ---------------------------------------------------------------------------
@@ -494,8 +552,8 @@ pub fn tdecimateCreate(
         if (clip2_node) |c2| zapi.freeNode(c2);
         return;
     }
-    if (cycle < 2 or cycle > 25) {
-        map_out.setError("TDecimate: cycle must be 2-25");
+    if (cycle < 2 or cycle > vi.numFrames) {
+        map_out.setError("TDecimate: cycle must be at least 2 and less than or equal to the number of frames in the clip");
         zapi.freeNode(node);
         if (clip2_node) |c2| zapi.freeNode(c2);
         return;
@@ -505,6 +563,31 @@ pub fn tdecimateCreate(
         zapi.freeNode(node);
         if (clip2_node) |c2| zapi.freeNode(c2);
         return;
+    }
+    const input_fps = @as(f64, @floatFromInt(vi.fpsNum)) / @as(f64, @floatFromInt(vi.fpsDen));
+    if ((mode == 2 or mode == 7) and rate >= input_fps) {
+        map_out.setError("TDecimate: mode 2 and 7 - new rate must be less than current rate");
+        zapi.freeNode(node);
+        if (clip2_node) |c2| zapi.freeNode(c2);
+        return;
+    }
+
+    var out_vi = vi.*;
+    var out_last_frame: i32 = @intCast(out_vi.numFrames - 1);
+    if (mode < 2) {
+        if (hybrid != 3) {
+            out_vi.numFrames = @intCast(@divTrunc(@as(i64, vi.numFrames) * @as(i64, cycle - cycle_r), @as(i64, cycle)));
+            const fps = mulDivFps(out_vi.fpsNum, out_vi.fpsDen, cycle - cycle_r, cycle);
+            out_vi.fpsNum = fps.num;
+            out_vi.fpsDen = fps.den;
+            out_last_frame = @intCast(out_vi.numFrames - 1);
+        }
+    } else if (mode == 2 or mode == 7) {
+        const fps = fpsFromFloat(rate);
+        out_vi.fpsNum = fps.num;
+        out_vi.fpsDen = fps.den;
+        out_vi.numFrames = @intFromFloat(@as(f64, @floatFromInt(vi.numFrames)) * (rate / input_fps));
+        out_last_frame = @intCast(out_vi.numFrames - 1);
     }
 
     // Copy strings
@@ -561,8 +644,9 @@ pub fn tdecimateCreate(
     } else &[_]u8{};
 
     // Derived values
-    const nfrms: i32 = @intCast(vi.numFrames);
-    const nfrms_n = nfrms - 1;
+    const input_frames: i32 = @intCast(vi.numFrames);
+    const nfrms: i32 = input_frames - 1;
+    const nfrms_n = out_last_frame;
     const blockx_half: i32 = @divTrunc(blockx, 2);
     const blocky_half: i32 = @divTrunc(blocky, 2);
     const blockx_shift: i32 = @as(i32, @intCast(@ctz(@as(u32, @intCast(blockx)))));
@@ -650,7 +734,7 @@ pub fn tdecimateCreate(
     data.* = .{
         .alloc = alloc,
         .node = node,
-        .vi = vi,
+        .vi = out_vi,
         .vi_child = vi_child,
         .mode = mode,
         .cycle_r = cycle_r,
@@ -742,7 +826,7 @@ pub fn tdecimateCreate(
     zapi.createVideoFilter(
         out,
         "TDecimate",
-        vi,
+        &data.vi,
         tdecimateGetFrame,
         tdecimateFree,
         .FrameState,
