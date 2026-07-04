@@ -141,8 +141,14 @@ pub fn tfmppCreate(
         return;
     }
 
-    if (vi.format.bitsPerSample != 8) {
-        map_out.setError("TFMPP: only 8-bit input supported currently");
+    if (vi.format.sampleType != .Integer) {
+        map_out.setError("TFMPP: only integer formats supported");
+        zapi.freeNode(node);
+        return;
+    }
+    const bits = vi.format.bitsPerSample;
+    if (bits < 8 or bits > 16) {
+        map_out.setError("TFMPP: only 8-16 bit formats supported");
         zapi.freeNode(node);
         return;
     }

@@ -364,8 +364,30 @@ pub fn tfmCreate(
         return;
     }
 
-    if (vi.format.bitsPerSample != 8) {
-        map_out.setError("TFM: only 8-bit input supported currently");
+    if (vi.format.sampleType != .Integer) {
+        map_out.setError("TFM: only integer formats supported");
+        zapi.freeNode(node);
+        return;
+    }
+
+    const bits = vi.format.bitsPerSample;
+    if (bits < 8 or bits > 16) {
+        map_out.setError("TFM: only 8-16 bit formats supported");
+        zapi.freeNode(node);
+        return;
+    }
+    if (!(bits == 8 or bits == 10 or bits == 12 or bits == 14 or bits == 16)) {
+        map_out.setError("TFM: only standard bit depths (8/10/12/14/16) supported");
+        zapi.freeNode(node);
+        return;
+    }
+    if (vi.width & 1 != 0 or vi.height & 1 != 0) {
+        map_out.setError("TFM: width and height must be divisible by 2");
+        zapi.freeNode(node);
+        return;
+    }
+    if (vi.height < 6 or vi.width < 64) {
+        map_out.setError("TFM: frame dimensions too small");
         zapi.freeNode(node);
         return;
     }
@@ -503,8 +525,7 @@ pub fn tfmCreate(
         };
 
         // Create 8-bit cmask frame for comb detection
-        const cmask_fmt = vi.format;
-        cmask_frame = zapi.newVideoFrame(&cmask_fmt, vi.width, vi.height, null);
+        cmask_frame = zapi.newVideoFrame(&vi.format, vi.width, vi.height, null);
         if (cmask_frame == null) {
             alloc.free(c_array.?);
             alloc.destroy(data);
@@ -517,6 +538,30 @@ pub fn tfmCreate(
             return;
         }
     }
+
+    // Allocate 8-bit map frame for field comparison (3x height for three diff layers)
+    var map_frame: ?*vs.Frame = null;
+    {
+        const map_height: i32 = @intCast(vi.height * 3);
+        map_frame = zapi.newVideoFrame(&vi.format, vi.width, map_height, null);
+        if (map_frame == null) {
+            if (c_array) |ca| alloc.free(ca);
+            if (cmask_frame) |cf| zapi.freeFrame(cf);
+            alloc.destroy(data);
+            alloc.free(output_c_path);
+            alloc.free(output_path);
+            alloc.free(input_path);
+            alloc.free(ovr_path);
+            map_out.setError("TFM: allocation failed (map)");
+            zapi.freeNode(node);
+            return;
+        }
+    }
+
+    // Compute scene-change threshold (matches C++ constructor)
+    const mod16_width: u64 = @intCast((@as(usize, @intCast(vi.width)) >> 4) << 4);
+    const h_u64: u64 = @intCast(vi.height);
+    const diffmax_sc: u64 = @intFromFloat(@round(@as(f64, @floatFromInt(mod16_width * h_u64 * (235 - 16))) * scthresh * 0.5 / 100.0));
 
     data.* = .{
         .alloc = alloc,
@@ -580,8 +625,8 @@ pub fn tfmCreate(
         .last_match = .{ .frame = -20, .match = -20, .field = -20, .combed = -20 },
         .sc_last = .{ .frame = -20, .diff = 0, .sc = false },
         .output_crc = 0,
-        .diffmax_sc = 0,
-        .map = null,
+        .diffmax_sc = diffmax_sc,
+        .map = map_frame,
         .cmask = cmask_frame,
         .map_vi = vi.*,
         .cmask_vi = vi.*,
