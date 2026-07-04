@@ -171,7 +171,7 @@ private:
   template<typename pixel_t>
   bool checkCombedPlanar_core(const VSFrameRef *src, int n, int match,
     int* blockN, int& xblocksi, int* mics, bool ddebug, int bits_per_pixel);
-  void applyY0Y1Exclusion(VSFrameRef *cmask, const VSAPI *vsapi) const;
+  void applyY0Y1Exclusion(VSFrameRef *cmask_ref, const VSAPI *vsapi_ref) const;
 //  bool checkCombedYUY2(const VSFrameRef *src, int n, int match,
 //    int *blockN, int &xblocksi, int *mics, bool ddebug, bool chroma,int cthresh);
   

@@ -61,60 +61,62 @@ static unsigned long long vs_cpu_xgetbv(unsigned ecx) {
 #endif
 }
 
-static void doGetCPUFeatures(CPUFeatures *cpuFeatures) {
-    memset(cpuFeatures, 0, sizeof(CPUFeatures));
+static CPUFeatures cpuFeatures;
 
-    int eax = 0;
-    int ebx = 0;
-    int ecx = 0;
-    int edx = 0;
-    long long xedxeax = 0;
-    vs_cpu_cpuid(1, &eax, &ebx, &ecx, &edx);
-    cpuFeatures->sse2 = !!(edx & (1 << 26)); //sse2
-    cpuFeatures->sse3 = !!(ecx & 1);
-    cpuFeatures->ssse3 = !!(ecx & (1 << 9));
-    cpuFeatures->sse4_1 = !!(ecx & (1 << 19));
-    cpuFeatures->sse4_2 = !!(ecx & (1 << 20));
-    cpuFeatures->fma3 = !!(ecx & (1 << 12));
-    cpuFeatures->f16c = !!(ecx & (1 << 29));
-    cpuFeatures->aes = !!(ecx & (1 << 25));
-    cpuFeatures->movbe = !!(ecx & (1 << 22));
-    cpuFeatures->popcnt = !!(ecx & (1 << 23));
+static void detectCPUFeatures(void) {
+    memset(&cpuFeatures, 0, sizeof(CPUFeatures));
 
-    if ((ecx & (1 << 27)) && (ecx & (1 << 28))) {
-        xedxeax = vs_cpu_xgetbv(0);
-        cpuFeatures->avx = ((xedxeax & 0x06) == 0x06);
-        if (cpuFeatures->avx) {
-            eax = 0;
-            ebx = 0;
-            ecx = 0;
-            edx = 0;
-            vs_cpu_cpuid(7, &eax, &ebx, &ecx, &edx);
-            cpuFeatures->avx2 = !!(ebx & (1 << 5));
-            cpuFeatures->avx512_f = !!(ebx & (1 << 16)) && ((xedxeax & 0xE0) == 0xE0);
+    int info[4];
+    vs_cpu_cpuid(0, &info[0], &info[1], &info[2], &info[3]);
+    int nIds = info[0];
 
-            if (cpuFeatures->avx512_f) {
-                cpuFeatures->avx512_cd = !!(ebx & (1 << 28));
-                cpuFeatures->avx512_bw = !!(ebx & (1 << 30));
-                cpuFeatures->avx512_dq = !!(ebx & (1 << 17));
-                cpuFeatures->avx512_vl = !!(ebx & (1 << 31));
+    vs_cpu_cpuid(1, &info[0], &info[1], &info[2], &info[3]);
+    cpuFeatures.sse2 = (info[3] & (1 << 26)) ? 1 : 0;
+    cpuFeatures.sse3 = (info[2] & (1 << 0)) ? 1 : 0;
+    cpuFeatures.ssse3 = (info[2] & (1 << 9)) ? 1 : 0;
+    cpuFeatures.fma3 = (info[2] & (1 << 12)) ? 1 : 0;
+    cpuFeatures.f16c = (info[2] & (1 << 29)) ? 1 : 0;
+    cpuFeatures.movbe = (info[2] & (1 << 22)) ? 1 : 0;
+    cpuFeatures.popcnt = (info[2] & (1 << 23)) ? 1 : 0;
+    cpuFeatures.aes = (info[2] & (1 << 25)) ? 1 : 0;
+    cpuFeatures.sse4_1 = (info[2] & (1 << 19)) ? 1 : 0;
+    cpuFeatures.sse4_2 = (info[2] & (1 << 20)) ? 1 : 0;
+    cpuFeatures.avx = 0;
+
+    if (info[2] & (1 << 27)) {
+        // osxsave
+        unsigned long long xcrFeatureMask = vs_cpu_xgetbv(0);
+        if ((xcrFeatureMask & 6) == 6) {
+            cpuFeatures.avx = (info[2] & (1 << 28)) ? 1 : 0;
+            cpuFeatures.avx2 = 0;
+            if (nIds >= 7) {
+                vs_cpu_cpuid(7, &info[0], &info[1], &info[2], &info[3]);
+                cpuFeatures.avx2 = (info[1] & (1 << 5)) ? 1 : 0;
+                cpuFeatures.avx512_f = (info[1] & (1 << 16)) ? 1 : 0;
+                cpuFeatures.avx512_cd = (info[1] & (1 << 28)) ? 1 : 0;
+                cpuFeatures.avx512_bw = (info[1] & (1 << 30)) ? 1 : 0;
+                cpuFeatures.avx512_dq = (info[1] & (1 << 17)) ? 1 : 0;
+                cpuFeatures.avx512_vl = (info[1] & (1 << 31)) ? 1 : 0;
             }
         }
     }
 }
-#else
-static void doGetCPUFeatures(CPUFeatures *cpuFeatures) {
-    memset(cpuFeatures, 0, sizeof(CPUFeatures));
+
+#else // !VS_TARGET_CPU_X86
+
+static CPUFeatures cpuFeatures;
+
+static void detectCPUFeatures(void) {
+    memset(&cpuFeatures, 0, sizeof(CPUFeatures));
 }
-#endif
+
+#endif // VS_TARGET_CPU_X86
 
 const CPUFeatures *getCPUFeatures(void) {
-    static CPUFeatures features = []()
-    {
-        CPUFeatures tmp;
-        doGetCPUFeatures(&tmp);
-        return tmp;
-    }();
-
-    return &features;
+    static int initialized = 0;
+    if (!initialized) {
+        detectCPUFeatures();
+        initialized = 1;
+    }
+    return &cpuFeatures;
 }
