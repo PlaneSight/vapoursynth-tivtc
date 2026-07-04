@@ -55,15 +55,22 @@ def vspipe_info(script: str, timeout: int = 15) -> dict:
 
 
 def vspipe_frames(script: str, requests: int = 1, timeout: int = 30) -> bytes:
-    """Run vspipe to raw video, return stdout bytes (pixel data)."""
-    proc = subprocess.run(
-        [VSPIPE, "--requests", str(requests), "-c", "y4m", "-", "-"],
-        input=script.encode(), capture_output=True, timeout=timeout,
-        cwd=REPO / "tests",
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"vspipe failed:\n{proc.stderr.decode()}")
-    return proc.stdout
+    """Run vspipe to raw y4m video, return stdout bytes (pixel data)."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".vpy", delete=False, dir=REPO / "tests"
+    ) as f:
+        f.write(script)
+        tmp = f.name
+    try:
+        proc = subprocess.run(
+            [VSPIPE, "--requests", str(requests), "-c", "y4m", tmp, "-"],
+            capture_output=True, timeout=timeout, cwd=REPO / "tests",
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"vspipe failed:\n{proc.stderr.decode()}")
+        return proc.stdout
+    finally:
+        os.unlink(tmp)
 
 
 def vspipe_checksum(script: str, requests: int = 1, timeout: int = 30) -> str:
