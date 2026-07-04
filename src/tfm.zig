@@ -10,6 +10,7 @@ const vsh = vapoursynth.vshelper;
 const ZAPI = vapoursynth.ZAPI;
 
 const common = @import("common.zig");
+const tfm_core = @import("tfm_core.zig");
 
 // ---------------------------------------------------------------------------
 // Per-instance filter data
@@ -80,6 +81,16 @@ pub const TFM = struct {
     tpitch_y: isize,
     tpitch_uv: isize,
 
+    /// Comb detection scratch (i32 array, aligned)
+    c_array: ?[]i32,
+
+    /// 8-bit map/cmask frames for comb detection
+    map: ?*vs.Frame,
+    cmask: ?*vs.Frame,
+    map_vi: vs.VideoInfo, // 8-bit version of vi
+    cmask_vi: vs.VideoInfo,
+    c_array_size: usize,
+
     // --- Override / output arrays ---
     ovr_array: std.ArrayListUnmanaged(u8),
     out_array: std.ArrayListUnmanaged(u8),
@@ -98,9 +109,7 @@ pub const TFM = struct {
     output_crc: u32,
     diffmax_sc: u64,
 
-    // --- Cached frames ---
-    map: ?*vs.Frame,
-    cmask: ?*vs.Frame,
+    // --- Override / output arrays ---
 };
 
 pub const MatchTrack = struct {
@@ -133,43 +142,145 @@ pub fn tfmGetFrame(
     const d: *TFM = @ptrCast(@alignCast(instance_data));
     const zapi = ZAPI.init(vsapi, core, frame_ctx);
 
+    const nn = common.clampFrame(n, d.nfrms);
+
     if (activation_reason == .Initial) {
-        const n0 = common.clampFrame(n - 1, d.nfrms);
-        const n1 = common.clampFrame(n, d.nfrms);
-        const n2 = common.clampFrame(n + 1, d.nfrms);
-        zapi.requestFrameFilter(n0, d.node);
-        zapi.requestFrameFilter(n1, d.node);
-        zapi.requestFrameFilter(n2, d.node);
+        zapi.requestFrameFilter(common.clampFrame(nn - 1, d.nfrms), d.node);
+        zapi.requestFrameFilter(nn, d.node);
+        zapi.requestFrameFilter(common.clampFrame(nn + 1, d.nfrms), d.node);
         return null;
     }
 
-    if (activation_reason != .AllFramesReady) {
-        return null;
+    if (activation_reason != .AllFramesReady) return null;
+
+    // Get the three frames for field matching
+    const prv_frame = zapi.initZFrame(d.node, common.clampFrame(nn - 1, d.nfrms));
+    const src_frame = zapi.initZFrame(d.node, nn);
+    const nxt_frame = zapi.initZFrame(d.node, common.clampFrame(nn + 1, d.nfrms));
+    defer prv_frame.deinit();
+    defer src_frame.deinit();
+    defer nxt_frame.deinit();
+
+    // Determine field order
+    var order: i32 = d.order_orig;
+    var field: i32 = d.field_orig;
+    if (order == -1) {
+        const src_props = zapi.vsapi.getFramePropertiesRO.?(src_frame.frame);
+        var err: vs.MapPropertyError = .Unset;
+        const field_based = zapi.vsapi.mapGetInt.?(src_props, "_FieldBased", 0, &err);
+        if (err == .Success) {
+            // _FieldBased: 0=Progressive, 1=BFF, 2=TFF; treat progressive as TFF
+            order = if (field_based == 1) @as(i32, 0) else @as(i32, 1);
+        } else {
+            order = 1;
+        }
     }
+    if (field == -1) field = order;
 
-    // TODO: full field matching logic
-    // For now, pass through as a skeleton
-    const src = zapi.initZFrame(d.node, n);
-    defer src.deinit();
+    // Allocate destination frame
+    const dst = src_frame.newVideoFrame();
 
-    var dst = src.newVideoFrame();
+    const bytes_per_sample: u32 = @intCast(d.vi.format.bytesPerSample);
+    const np = d.vi.format.numPlanes;
 
-    // Passthrough placeholder — copy source to destination
-    var plane: u32 = 0;
-    while (plane < d.vi.format.numPlanes) : (plane += 1) {
-        var srcp = src.getReadSlice(plane);
-        var dstp = dst.getWriteSlice(plane);
-        const w, const h, const stride = src.getDimensions(plane);
-        var y: u32 = 0;
-        while (y < h) : (y += 1) {
-            @memcpy(dstp[0..w], srcp[0..w]);
-            dstp = dstp[stride..];
-            srcp = srcp[stride..];
+    // --- Field matching logic ---
+    // For mode=1: try match=c (1), fall back to p(0)/n(2) if combed
+    const frstT: i32 = if ((field ^ order) != 0) 2 else 0;
+    const scndT: i32 = if (field ^ order != 0) 3 else 2;
+    _ = frstT;
+    _ = scndT; // TODO: use in full field comparison
+
+    const fmatch: i32 = 1; // default: match c
+    var combed: i32 = 0;
+    var blockN: [5]i32 = [_]i32{common.SENTINEL} ** 5;
+    var mics: [5]i32 = [_]i32{common.SENTINEL} ** 5;
+    const d2vfilm = false;
+    
+
+    // Try field matching: weave with match=c, check combing
+    // If combed, try frstT (p or n depending on field/order)
+    {
+        var plane_i: u32 = 0;
+        while (plane_i < np) : (plane_i += 1) {
+            const dst_rwp = zapi.getWritePtr(dst.frame, @intCast(plane_i));
+            const src_rop = zapi.getReadPtr(src_frame.frame, @intCast(plane_i));
+            const prv_rop = zapi.getReadPtr(prv_frame.frame, @intCast(plane_i));
+            const nxt_rop = zapi.getReadPtr(nxt_frame.frame, @intCast(plane_i));
+            const dst_str = zapi.getStride(dst.frame, @intCast(plane_i));
+            const w = zapi.getFrameWidth(dst.frame, @intCast(plane_i));
+            const h = zapi.getFrameHeight(dst.frame, @intCast(plane_i));
+
+            tfm_core.weaveFrame(u8, dst_rwp, src_rop, prv_rop, nxt_rop,
+                dst_str, @intCast(w), @intCast(h), fmatch, field, bytes_per_sample);
         }
     }
 
-    // Write frame properties (TODO: putFrameProperties)
-    _ = &d.vi; // suppress unused warning while skeleton is incomplete
+    // Comb detection on the woven frame
+    if (d.pp > 0 or d.mode > 0) {
+        combed = 0;
+        if (d.cmask) |cmf| {
+            // Analyze comb mask on the dst frame
+            {
+                var plane_i: u32 = 0;
+                while (plane_i < np and (plane_i < 1 or d.chroma)) : (plane_i += 1) {
+                    const src_rop = zapi.getReadPtr(dst.frame, @intCast(plane_i));
+                    const cmk_rwp = zapi.getWritePtr(cmf, @intCast(plane_i));
+                    const src_pitch = zapi.getStride(dst.frame, @intCast(plane_i));
+                    const cmk_pitch = zapi.getStride(cmf, @intCast(plane_i));
+                    const w = zapi.getFrameWidth(dst.frame, @intCast(plane_i));
+                    const h = zapi.getFrameHeight(dst.frame, @intCast(plane_i));
+                    const cthresh_scaled = d.cthresh;
+
+                    if (bytes_per_sample == 1) {
+                        tfm_core.analyzeCombMask(u8, src_rop, cmk_rwp, @intCast(w), @intCast(h), src_pitch, cmk_pitch, cthresh_scaled);
+                    }
+                }
+            }
+
+            // Apply y0/y1 exclusion band
+            if (d.y0 != 0 or d.y1 != 0) {
+                var plane_i: u32 = 0;
+                while (plane_i < np) : (plane_i += 1) {
+                    var y0_plane: u32 = @intCast(d.y0);
+                    var y1_plane: u32 = @intCast(d.y1);
+                    if (plane_i > 0 and d.vi.format.subSamplingH > 0) {
+                        y0_plane >>= @intCast(d.vi.format.subSamplingH);
+                        y1_plane >>= @intCast(d.vi.format.subSamplingH);
+                    }
+                    const h = zapi.getFrameHeight(cmf, @intCast(plane_i));
+                    if (@as(i32, @intCast(y1_plane)) > h) y1_plane = @intCast(h);
+                    const cmk_pitch = zapi.getStride(cmf, @intCast(plane_i));
+                    const cmkp = zapi.getWritePtr(cmf, @intCast(plane_i));
+                    const row_len: usize = @intCast(cmk_pitch);
+                    var yr: u32 = y0_plane;
+                    while (yr < y1_plane) : (yr += 1) {
+                        @memset(cmkp[@as(usize, @intCast(yr)) * row_len ..][0..row_len], 0);
+                    }
+                }
+            }
+
+            // Count comb blocks
+            if (d.c_array) |ca| {
+                const cmkp = zapi.getWritePtr(cmf, 0);
+                const cmk_pitch = zapi.getStride(cmf, 0);
+                const w = zapi.getFrameWidth(cmf, 0);
+                const h = zapi.getFrameHeight(cmf, 0);
+                const result = tfm_core.countCombBlocks(cmkp, cmk_pitch, ca, @intCast(w), @intCast(h),
+                    d.xhalf, d.yhalf, d.xshift, d.yshift, d.mi);
+                mics[@intCast(fmatch)] = result.mic_value;
+                blockN[@intCast(fmatch)] = result.block_n;
+                if (result.combed) combed = 2;
+            }
+        }
+    }
+
+    // Write frame properties (hints for TDecimate)
+    if (d.use_hints) {
+        tfm_core.putFrameProperties(&zapi, dst.frame, fmatch, combed, d2vfilm, mics, field, d.pp);
+    }
+
+    // Update tracking state
+    d.last_match = .{ .frame = nn, .match = fmatch, .field = field, .combed = combed };
 
     return dst.frame;
 }
@@ -196,6 +307,9 @@ pub fn tfmFree(
     // Free frame caches
     if (d.map) |f| vsapi.?.freeFrame.?(f);
     if (d.cmask) |f| vsapi.?.freeFrame.?(f);
+
+    // Free comb detection scratch buffer
+    if (d.c_array) |ca| d.alloc.free(ca);
 
     // Free arraylists
     d.ovr_array.deinit(d.alloc);
@@ -366,6 +480,44 @@ pub fn tfmCreate(
         return;
     };
 
+    // Allocate scratch buffers for comb detection
+    var c_array: ?[]i32 = null;
+    var cmask_frame: ?*vs.Frame = null;
+    var c_array_size: usize = 0;
+
+    if (mode == 1 or mode == 2 or mode == 3 or mode == 5 or mode == 6 or mode == 7 or
+        pp > 0 or micout > 0 or micmatching > 0)
+    {
+        const xblocks: i32 = @as(i32, @intCast(((@as(usize, @intCast(vi.width)) + @as(usize, @intCast(xhalf))) >> @as(u5, @intCast(xshift))))) + 1;
+        const yblocks: i32 = @as(i32, @intCast(((@as(usize, @intCast(vi.height)) + @as(usize, @intCast(yhalf))) >> @as(u5, @intCast(yshift))))) + 1;
+        c_array_size = @as(usize, @intCast((xblocks * yblocks) << 2));
+        c_array = alloc.alloc(i32, c_array_size) catch {
+            alloc.destroy(data);
+            alloc.free(output_c_path);
+            alloc.free(output_path);
+            alloc.free(input_path);
+            alloc.free(ovr_path);
+            map_out.setError("TFM: allocation failed (cArray)");
+            zapi.freeNode(node);
+            return;
+        };
+
+        // Create 8-bit cmask frame for comb detection
+        const cmask_fmt = vi.format;
+        cmask_frame = zapi.newVideoFrame(&cmask_fmt, vi.width, vi.height, null);
+        if (cmask_frame == null) {
+            alloc.free(c_array.?);
+            alloc.destroy(data);
+            alloc.free(output_c_path);
+            alloc.free(output_path);
+            alloc.free(input_path);
+            alloc.free(ovr_path);
+            map_out.setError("TFM: allocation failed (cmask)");
+            zapi.freeNode(node);
+            return;
+        }
+    }
+
     data.* = .{
         .alloc = alloc,
         .node = node,
@@ -430,7 +582,11 @@ pub fn tfmCreate(
         .output_crc = 0,
         .diffmax_sc = 0,
         .map = null,
-        .cmask = null,
+        .cmask = cmask_frame,
+        .map_vi = vi.*,
+        .cmask_vi = vi.*,
+        .c_array = c_array,
+        .c_array_size = c_array_size,
     };
 
     // TFM uses serial filter mode — shared scratch buffers and mutable
