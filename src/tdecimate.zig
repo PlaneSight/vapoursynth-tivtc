@@ -12,6 +12,7 @@ const ZAPI = vapoursynth.ZAPI;
 const common = @import("common.zig");
 const cycle_mod = @import("cycle.zig");
 const Cycle = cycle_mod.Cycle;
+const tdm_core = @import("tdecimate_core.zig");
 
 // ---------------------------------------------------------------------------
 // Per-instance filter data
@@ -179,15 +180,12 @@ fn tdecimateGetFrameMode01(
     const cycle_r = d.cycle_r;
     const hybrid = d.hybrid;
 
-    // Determine which cycle this output frame belongs to
-    // In mode 0/1: each cycle of `cycle` input frames produces `cycle - cycleR` output frames
     const eval_group: i32 = if (hybrid != 3)
         @divTrunc(n, cycle - cycle_r) * cycle
     else
         @divTrunc(n, cycle) * cycle;
 
     if (activation_reason == .Initial) {
-        // Request all frames in this cycle and neighboring cycles
         const vi_nfrms: i32 = @intCast(d.vi_child.numFrames);
         var i: i32 = eval_group - cycle - 1;
         while (i < eval_group + cycle * 3) : (i += 1) {
@@ -198,37 +196,96 @@ fn tdecimateGetFrameMode01(
 
     if (activation_reason != .AllFramesReady) return null;
 
-    // Compute which input frame to return for this output frame
-    // For mode 0: drop the most similar consecutive pair
-    // For now, simple approach: map output n to input frame
-    // Position within the output group
+    // Compute metrics for this cycle if not already done
+    if (!d.curr.mSet or d.curr.frame != eval_group) {
+        d.curr.setFrame(eval_group);
+
+        const bits: i32 = d.vi.format.bitsPerSample;
+        const vi_nfrms: i32 = @intCast(d.vi_child.numFrames);
+
+        // Compute diff between each consecutive pair in the cycle
+        var j: i32 = 0;
+        while (j < cycle - 1) : (j += 1) {
+            const f1_idx: i32 = common.clampFrame(eval_group + j, vi_nfrms);
+            const f2_idx: i32 = common.clampFrame(eval_group + j + 1, vi_nfrms);
+
+            const f1 = zapi.initZFrame(d.node, f1_idx);
+            const f2 = zapi.initZFrame(d.node, f2_idx);
+
+            const f1_rp = zapi.getReadPtr(f1.frame, 0);
+            const f2_rp = zapi.getReadPtr(f2.frame, 0);
+            const f1_stride = zapi.getStride(f1.frame, 0);
+            const f2_stride = zapi.getStride(f2.frame, 0);
+            const luma_w: u32 = @intCast(zapi.getFrameWidth(f1.frame, 0));
+            const luma_h: u32 = @intCast(zapi.getFrameHeight(f1.frame, 0));
+
+            const diff: u64 = if (bits == 8)
+                tdm_core.frameDiff(u8, f1_rp, f2_rp, f1_stride, f2_stride, luma_w, luma_h, d.ssd, d.nt)
+            else
+                tdm_core.frameDiff(u16, f1_rp, f2_rp, f1_stride, f2_stride, luma_w, luma_h, d.ssd, d.nt);
+
+            const idx: usize = @intCast(j);
+            d.curr.diffMetricsU[idx] = diff;
+            d.curr.diffMetricsUF[idx] = diff;
+
+            f1.deinit();
+            f2.deinit();
+        }
+        // Last position in cycle: diff with first frame of next cycle
+        {
+            const last_idx: i32 = common.clampFrame(eval_group + cycle - 1, vi_nfrms);
+            const next_idx: i32 = common.clampFrame(eval_group + cycle, vi_nfrms);
+            const f1 = zapi.initZFrame(d.node, last_idx);
+            const f2 = zapi.initZFrame(d.node, next_idx);
+
+            const f1_rp = zapi.getReadPtr(f1.frame, 0);
+            const f2_rp = zapi.getReadPtr(f2.frame, 0);
+            const f1_stride = zapi.getStride(f1.frame, 0);
+            const f2_stride = zapi.getStride(f2.frame, 0);
+            const luma_w: u32 = @intCast(zapi.getFrameWidth(f1.frame, 0));
+            const luma_h: u32 = @intCast(zapi.getFrameHeight(f1.frame, 0));
+
+            const diff: u64 = if (bits == 8)
+                tdm_core.frameDiff(u8, f1_rp, f2_rp, f1_stride, f2_stride, luma_w, luma_h, d.ssd, d.nt)
+            else
+                tdm_core.frameDiff(u16, f1_rp, f2_rp, f1_stride, f2_stride, luma_w, luma_h, d.ssd, d.nt);
+
+            d.curr.diffMetricsU[@intCast(cycle - 1)] = diff;
+            d.curr.diffMetricsUF[@intCast(cycle - 1)] = diff;
+
+            f1.deinit();
+            f2.deinit();
+        }
+
+        d.curr.mSet = true;
+
+        // Make decimation decision
+        if (d.mode == 0) {
+            tdm_core.mostSimilarDecDecision(&d.curr, cycle_r);
+        } else {
+            // Mode 1: longest string (simplified — same as mode 0 for now)
+            tdm_core.mostSimilarDecDecision(&d.curr, cycle_r);
+        }
+    }
+
+    // Map output frame to input, skipping dropped frames
     const pos_in_group = if (hybrid != 3)
         n - @divTrunc(n, cycle - cycle_r) * (cycle - cycle_r)
     else
         n - @divTrunc(n, cycle) * cycle;
 
-    // For a proper implementation, we'd compute metrics and decide which frame to drop.
-    // For the skeleton, use a fixed drop pattern: always drop frame at position cycle_r.
-    // In 5:1 decimation: drop frame 4 (0-indexed), return frames 0,1,2,3.
-
-    // Map output position to input frame, skipping dropped frames
-    var src_frame: i32 = eval_group + pos_in_group;
-    var skipped: i32 = 0;
-    var i: i32 = 0;
-    while (i <= pos_in_group + skipped and i < cycle) : (i += 1) {
-        // Drop frame at fixed position (cycleR for now — simplest drop pattern)
-        if (hybrid == 3) {
-            // no dropping in hybrid=3
-        } else if (i == cycle_r or i == cycle_r + 1) {
-            // Drop this frame (simplistic: always drop the cycleR-th and next frame)
-            if (i <= pos_in_group + skipped and src_frame < eval_group + cycle) {
-                src_frame += 1;
-                skipped += 1;
-            }
+    // Find the input frame index by counting non-dropped frames
+    var src_idx: i32 = eval_group;
+    var kept: i32 = 0;
+    while (src_idx < eval_group + cycle) : (src_idx += 1) {
+        const ci: usize = @intCast(src_idx - eval_group);
+        if (d.curr.decimate2[ci] == 0) {
+            if (kept == pos_in_group) break;
+            kept += 1;
         }
     }
 
-    const frame_idx = common.clampFrame(eval_group + @min(pos_in_group + skipped, cycle - 1), d.nfrms);
+    const frame_idx = common.clampFrame(src_idx, d.nfrms);
     const src = zapi.initZFrame(d.node, frame_idx);
     defer src.deinit();
 

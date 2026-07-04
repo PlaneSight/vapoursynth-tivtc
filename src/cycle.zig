@@ -238,7 +238,7 @@ pub const Cycle = struct {
             if (count >= num) break;
             const idx: usize = @as(usize, @intCast(self.lowest[i]));
             if (self.lowest[i] >= 0 and self.diffMetricsU[idx] > 0) {
-                self.decimate[idx] = idx;
+                self.decimate[idx] = @as(i32, @intCast(idx));
                 count += 1;
             }
         }
