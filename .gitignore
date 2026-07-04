@@ -5,3 +5,7 @@ build/
 *.dylib
 *.dll
 *.so
+__pycache__/
+.pytest_cache/
+.venv/
+uv.lock

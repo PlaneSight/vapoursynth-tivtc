@@ -1,0 +1,13 @@
+[project]
+name = "tivtc-tests"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "vapoursynth>=77",
+    "numpy>=2",
+    "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["issues"]
+pythonpath = ["."]

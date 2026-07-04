@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: brew install meson ninja pkg-config vapoursynth
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build
+        run: |
+          meson setup build-cpp
+          ninja -C build-cpp
+
+      - name: Test
+        run: cd tests && uv run pytest issues/ -v --tb=short
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build pkg-config \
+            autoconf automake libtool python3-dev libzimg-dev
+
+      - name: Build VapourSynth
+        run: |
+          git clone --depth 1 --branch R77 https://github.com/vapoursynth/vapoursynth.git
+          cd vapoursynth
+          ./autogen.sh
+          ./configure
+          make -j$(nproc)
+          sudo make install
+          sudo ldconfig
+
+      - name: Build plugin
+        run: |
+          meson setup build-linux
+          ninja -C build-linux
