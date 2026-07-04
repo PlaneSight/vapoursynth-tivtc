@@ -196,6 +196,33 @@ fn checkCombedFrame(
     return 0;
 }
 
+/// Weave a single match into dst across all planes.
+fn weaveMatch(
+    d: *TFM,
+    zapi: *const ZAPI,
+    dst: ?*vs.Frame,
+    src: ?*const vs.Frame,
+    prv: ?*const vs.Frame,
+    nxt: ?*const vs.Frame,
+    np: i32,
+    match: i32,
+    field: i32,
+    bps: u32,
+) void {
+    _ = d;
+    var plane_i: u32 = 0;
+    while (plane_i < np) : (plane_i += 1) {
+        const dst_rwp = zapi.getWritePtr(dst, @intCast(plane_i));
+        const src_rop = zapi.getReadPtr(src, @intCast(plane_i));
+        const prv_rop = zapi.getReadPtr(prv, @intCast(plane_i));
+        const nxt_rop = zapi.getReadPtr(nxt, @intCast(plane_i));
+        const dst_str = zapi.getStride(dst, @intCast(plane_i));
+        const wu: u32 = @intCast(zapi.getFrameWidth(dst, @intCast(plane_i)));
+        const hu: u32 = @intCast(zapi.getFrameHeight(dst, @intCast(plane_i)));
+        tfm_core.weaveFrame(u8, dst_rwp, src_rop, prv_rop, nxt_rop, dst_str, wu, hu, match, field, bps);
+    }
+}
+
 // ---------------------------------------------------------------------------
 
 pub fn tfmGetFrame(
@@ -271,19 +298,7 @@ pub fn tfmGetFrame(
         fmatch = 1;
 
         // Weave with match=c
-        {
-            var plane_i: u32 = 0;
-            while (plane_i < np) : (plane_i += 1) {
-                const dst_rwp = zapi.getWritePtr(dst.frame, @intCast(plane_i));
-                const src_rop = zapi.getReadPtr(src_frame.frame, @intCast(plane_i));
-                const prv_rop = zapi.getReadPtr(prv_frame.frame, @intCast(plane_i));
-                const nxt_rop = zapi.getReadPtr(nxt_frame.frame, @intCast(plane_i));
-                const dst_str = zapi.getStride(dst.frame, @intCast(plane_i));
-                const wu: u32 = @intCast(zapi.getFrameWidth(dst.frame, @intCast(plane_i)));
-                const hu: u32 = @intCast(zapi.getFrameHeight(dst.frame, @intCast(plane_i)));
-                tfm_core.weaveFrame(u8, dst_rwp, src_rop, prv_rop, nxt_rop, dst_str, wu, hu, fmatch, field, bytes_per_sample);
-            }
-        }
+        weaveMatch(d, &zapi, dst.frame, src_frame.frame, prv_frame.frame, nxt_frame.frame, np, fmatch, field, bytes_per_sample);
 
         // Check combing on match=c (all modes > 0)
         if (d.mode > 0 and d.pp > 0) {
@@ -294,103 +309,98 @@ pub fn tfmGetFrame(
         if (combed == 2 and d.mode > 0) {
             if (d.mode == 1 or d.mode == 5) {
                 // Try frstT (p or n) as fallback
-                const fallback_m = frstT;
-                {
-                    var plane_i: u32 = 0;
-                    while (plane_i < np) : (plane_i += 1) {
-                        const dst_rwp = zapi.getWritePtr(dst.frame, @intCast(plane_i));
-                        const src_rop = zapi.getReadPtr(src_frame.frame, @intCast(plane_i));
-                        const prv_rop = zapi.getReadPtr(prv_frame.frame, @intCast(plane_i));
-                        const nxt_rop = zapi.getReadPtr(nxt_frame.frame, @intCast(plane_i));
-                        const dst_str = zapi.getStride(dst.frame, @intCast(plane_i));
-                        const wu: u32 = @intCast(zapi.getFrameWidth(dst.frame, @intCast(plane_i)));
-                        const hu: u32 = @intCast(zapi.getFrameHeight(dst.frame, @intCast(plane_i)));
-                        tfm_core.weaveFrame(u8, dst_rwp, src_rop, prv_rop, nxt_rop, dst_str, wu, hu, fallback_m, field, bytes_per_sample);
-                    }
-                }
-                const fallback_combed = checkCombedFrame(d, &zapi, dst.frame, np, &mics, &blockN, fallback_m);
+                weaveMatch(d, &zapi, dst.frame, src_frame.frame, prv_frame.frame, nxt_frame.frame, np, frstT, field, bytes_per_sample);
+                const fallback_combed = checkCombedFrame(d, &zapi, dst.frame, np, &mics, &blockN, frstT);
                 if (fallback_combed == 0) {
-                    fmatch = fallback_m;
+                    fmatch = frstT;
                     combed = 0;
                 }
             } else if (d.mode == 2) {
                 // Try scndT (u) as fallback
-                const fallback_m = scndT;
-                {
-                    var plane_i: u32 = 0;
-                    while (plane_i < np) : (plane_i += 1) {
-                        const dst_rwp = zapi.getWritePtr(dst.frame, @intCast(plane_i));
-                        const src_rop = zapi.getReadPtr(src_frame.frame, @intCast(plane_i));
-                        const prv_rop = zapi.getReadPtr(prv_frame.frame, @intCast(plane_i));
-                        const nxt_rop = zapi.getReadPtr(nxt_frame.frame, @intCast(plane_i));
-                        const dst_str = zapi.getStride(dst.frame, @intCast(plane_i));
-                        const wu: u32 = @intCast(zapi.getFrameWidth(dst.frame, @intCast(plane_i)));
-                        const hu: u32 = @intCast(zapi.getFrameHeight(dst.frame, @intCast(plane_i)));
-                        tfm_core.weaveFrame(u8, dst_rwp, src_rop, prv_rop, nxt_rop, dst_str, wu, hu, fallback_m, field, bytes_per_sample);
-                    }
-                }
-                const fallback_combed = checkCombedFrame(d, &zapi, dst.frame, np, &mics, &blockN, fallback_m);
-                if (fallback_combed == 0) {
-                    fmatch = fallback_m;
+                weaveMatch(d, &zapi, dst.frame, src_frame.frame, prv_frame.frame, nxt_frame.frame, np, scndT, field, bytes_per_sample);
+                const fb_combed = checkCombedFrame(d, &zapi, dst.frame, np, &mics, &blockN, scndT);
+                if (fb_combed == 0) {
+                    fmatch = scndT;
                     combed = 0;
                 }
             } else if (d.mode == 3 or d.mode == 4) {
-                // Try frstT first, then scndT as second fallback
-                {
-                    const first_fb = frstT;
-                    var plane_i: u32 = 0;
-                    while (plane_i < np) : (plane_i += 1) {
-                        const dst_rwp = zapi.getWritePtr(dst.frame, @intCast(plane_i));
-                        const src_rop = zapi.getReadPtr(src_frame.frame, @intCast(plane_i));
-                        const prv_rop = zapi.getReadPtr(prv_frame.frame, @intCast(plane_i));
-                        const nxt_rop = zapi.getReadPtr(nxt_frame.frame, @intCast(plane_i));
-                        const dst_str = zapi.getStride(dst.frame, @intCast(plane_i));
-                        const wu: u32 = @intCast(zapi.getFrameWidth(dst.frame, @intCast(plane_i)));
-                        const hu: u32 = @intCast(zapi.getFrameHeight(dst.frame, @intCast(plane_i)));
-                        tfm_core.weaveFrame(u8, dst_rwp, src_rop, prv_rop, nxt_rop, dst_str, wu, hu, first_fb, field, bytes_per_sample);
-                    }
-                }
-                const fb1_combed = checkCombedFrame(d, &zapi, dst.frame, np, &mics, &blockN, frstT);
-                if (fb1_combed == 0) {
+                // Try frstT first, then scndT
+                weaveMatch(d, &zapi, dst.frame, src_frame.frame, prv_frame.frame, nxt_frame.frame, np, frstT, field, bytes_per_sample);
+                const fb1 = checkCombedFrame(d, &zapi, dst.frame, np, &mics, &blockN, frstT);
+                if (fb1 == 0) {
                     fmatch = frstT;
                     combed = 0;
                 } else {
-                    {
-                        const second_fb = scndT;
-                        var plane_i: u32 = 0;
-                        while (plane_i < np) : (plane_i += 1) {
-                            const dst_rwp = zapi.getWritePtr(dst.frame, @intCast(plane_i));
-                            const src_rop = zapi.getReadPtr(src_frame.frame, @intCast(plane_i));
-                            const prv_rop = zapi.getReadPtr(prv_frame.frame, @intCast(plane_i));
-                            const nxt_rop = zapi.getReadPtr(nxt_frame.frame, @intCast(plane_i));
-                            const dst_str = zapi.getStride(dst.frame, @intCast(plane_i));
-                            const wu: u32 = @intCast(zapi.getFrameWidth(dst.frame, @intCast(plane_i)));
-                            const hu: u32 = @intCast(zapi.getFrameHeight(dst.frame, @intCast(plane_i)));
-                            tfm_core.weaveFrame(u8, dst_rwp, src_rop, prv_rop, nxt_rop, dst_str, wu, hu, second_fb, field, bytes_per_sample);
-                        }
-                    }
-                    const fb2_combed = checkCombedFrame(d, &zapi, dst.frame, np, &mics, &blockN, scndT);
-                    if (fb2_combed == 0) {
+                    weaveMatch(d, &zapi, dst.frame, src_frame.frame, prv_frame.frame, nxt_frame.frame, np, scndT, field, bytes_per_sample);
+                    const fb2 = checkCombedFrame(d, &zapi, dst.frame, np, &mics, &blockN, scndT);
+                    if (fb2 == 0) {
                         fmatch = scndT;
                         combed = 0;
                     }
+                }
+            } else if (d.mode == 6) {
+                // Mode 6: try up to 4 fallbacks (frstT, scndT, then two more)
+                const thrdT: i32 = if (field ^ order != 0) @as(i32, 0) else @as(i32, 2);
+                const frthT: i32 = if (field ^ order != 0) @as(i32, 4) else @as(i32, 3);
+
+                // Try frstT
+                weaveMatch(d, &zapi, dst.frame, src_frame.frame, prv_frame.frame, nxt_frame.frame, np, frstT, field, bytes_per_sample);
+                const fb1 = checkCombedFrame(d, &zapi, dst.frame, np, &mics, &blockN, frstT);
+                if (fb1 == 0) { fmatch = frstT; combed = 0; }
+                else {
+                    // Try scndT
+                    weaveMatch(d, &zapi, dst.frame, src_frame.frame, prv_frame.frame, nxt_frame.frame, np, scndT, field, bytes_per_sample);
+                    const fb2 = checkCombedFrame(d, &zapi, dst.frame, np, &mics, &blockN, scndT);
+                    if (fb2 == 0) { fmatch = scndT; combed = 0; }
+                    else {
+                        // Try thrdT
+                        weaveMatch(d, &zapi, dst.frame, src_frame.frame, prv_frame.frame, nxt_frame.frame, np, thrdT, field, bytes_per_sample);
+                        const fb3 = checkCombedFrame(d, &zapi, dst.frame, np, &mics, &blockN, thrdT);
+                        if (fb3 == 0) { fmatch = thrdT; combed = 0; }
+                        else {
+                            // Try frthT
+                            weaveMatch(d, &zapi, dst.frame, src_frame.frame, prv_frame.frame, nxt_frame.frame, np, frthT, field, bytes_per_sample);
+                            const fb4 = checkCombedFrame(d, &zapi, dst.frame, np, &mics, &blockN, frthT);
+                            if (fb4 == 0) { fmatch = frthT; combed = 0; }
+                        }
+                    }
+                }
+            } else if (d.mode == 7) {
+                // Mode 7: two-field analysis, compare match=1 vs frstT
+                var combed1: bool = undefined;
+                var combed2: bool = undefined;
+
+                weaveMatch(d, &zapi, dst.frame, src_frame.frame, prv_frame.frame, nxt_frame.frame, np, 1, field, bytes_per_sample);
+                combed1 = checkCombedFrame(d, &zapi, dst.frame, np, &mics, &blockN, 1) == 2;
+
+                weaveMatch(d, &zapi, dst.frame, src_frame.frame, prv_frame.frame, nxt_frame.frame, np, frstT, field, bytes_per_sample);
+                combed2 = checkCombedFrame(d, &zapi, dst.frame, np, &mics, &blockN, frstT) == 2;
+
+                if (!combed1 and !combed2) {
+                    // Both clean: pick the one determined by compareFields
+                    fmatch = 1;
+                    combed = 0;
+                    d.mode7_field = if (field == 0) @as(i32, 1) else @as(i32, 0);
+                } else if (!combed2 and combed1) {
+                    fmatch = frstT;
+                    combed = 0;
+                    d.mode7_field = 1;
+                } else if (!combed1 and combed2) {
+                    fmatch = 1;
+                    combed = 0;
+                    d.mode7_field = 0;
+                } else {
+                    // Both combed: use mode7_field from previous frame
+                    fmatch = 1;
+                    combed = 2;
+                    field = d.mode7_field;
                 }
             }
         }
 
         // Re-weave with final match decision if it changed from c
         if (fmatch != 1) {
-            var plane_i: u32 = 0;
-            while (plane_i < np) : (plane_i += 1) {
-                const dst_rwp = zapi.getWritePtr(dst.frame, @intCast(plane_i));
-                const src_rop = zapi.getReadPtr(src_frame.frame, @intCast(plane_i));
-                const prv_rop = zapi.getReadPtr(prv_frame.frame, @intCast(plane_i));
-                const nxt_rop = zapi.getReadPtr(nxt_frame.frame, @intCast(plane_i));
-                const dst_str = zapi.getStride(dst.frame, @intCast(plane_i));
-                const wu: u32 = @intCast(zapi.getFrameWidth(dst.frame, @intCast(plane_i)));
-                const hu: u32 = @intCast(zapi.getFrameHeight(dst.frame, @intCast(plane_i)));
-                tfm_core.weaveFrame(u8, dst_rwp, src_rop, prv_rop, nxt_rop, dst_str, wu, hu, fmatch, field, bytes_per_sample);
-            }
+            weaveMatch(d, &zapi, dst.frame, src_frame.frame, prv_frame.frame, nxt_frame.frame, np, fmatch, field, bytes_per_sample);
         }
     }
 
