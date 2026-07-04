@@ -26,7 +26,6 @@ extern "C" {
 #endif
 
 typedef struct CPUFeatures {
-#ifdef VS_TARGET_CPU_X86
     char sse2;
     char sse3;
     char ssse3;
@@ -44,7 +43,6 @@ typedef struct CPUFeatures {
     char avx512_bw;
     char avx512_dq;
     char avx512_vl;
-#endif
 } CPUFeatures;
 
 const CPUFeatures *getCPUFeatures(void);

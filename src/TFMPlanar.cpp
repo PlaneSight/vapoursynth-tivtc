@@ -269,7 +269,7 @@ bool TFM::checkCombedPlanar(const VSFrameRef *src, int n, int match,
   }
 }
 
-void TFM::applyY0Y1Exclusion(VSFrameRef *cmask, const VSAPI *vsapi) const
+void TFM::applyY0Y1Exclusion(VSFrameRef *cmask_ref, const VSAPI *vsapi_ref) const
 {
   if (y0 == 0 && y1 == 0) return;
 
@@ -277,8 +277,8 @@ void TFM::applyY0Y1Exclusion(VSFrameRef *cmask, const VSAPI *vsapi) const
 
   for (int b = 0; b < np; ++b)
   {
-    const int cmk_pitch = vsapi->getStride(cmask, b);
-    uint8_t *cmkp = vsapi->getWritePtr(cmask, b);
+    const int cmk_pitch = vsapi_ref->getStride(cmask_ref, b);
+    uint8_t *cmkp = vsapi_ref->getWritePtr(cmask_ref, b);
 
     int y0_plane = y0;
     int y1_plane = y1;
@@ -289,7 +289,7 @@ void TFM::applyY0Y1Exclusion(VSFrameRef *cmask, const VSAPI *vsapi) const
       y1_plane = std::max(0, y1 >> vi->format->subSamplingH);
     }
 
-    y1_plane = std::min(y1_plane, vsapi->getFrameHeight(cmask, b));
+    y1_plane = std::min(y1_plane, vsapi_ref->getFrameHeight(cmask_ref, b));
 
     for (int y = y0_plane; y < y1_plane; ++y)
       memset(cmkp + y * cmk_pitch, 0, cmk_pitch);
