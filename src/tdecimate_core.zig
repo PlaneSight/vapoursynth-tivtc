@@ -32,22 +32,31 @@ pub fn frameDiff(
     const h: usize = @intCast(height);
 
     var total: u64 = 0;
-    var y: usize = 0;
-    while (y < h) : (y += 1) {
-        const prv_row = y * pixel_pitch_prev;
-        const cur_row = y * pixel_pitch_curr;
-        var x: usize = 0;
-        while (x < w) : (x += 1) {
-            const a: i64 = @intCast(prv_typed[prv_row + x]);
-            const b: i64 = @intCast(cur_typed[cur_row + x]);
-            const d: i64 = if (a > b) a - b else b - a;
-            if (ssd) {
+    if (ssd) {
+        var y: usize = 0;
+        while (y < h) : (y += 1) {
+            const prv_row = y * pixel_pitch_prev;
+            const cur_row = y * pixel_pitch_curr;
+            var x: usize = 0;
+            while (x < w) : (x += 1) {
+                const a: i64 = @intCast(prv_typed[prv_row + x]);
+                const b: i64 = @intCast(cur_typed[cur_row + x]);
+                const d: i64 = if (a > b) a - b else b - a;
                 total += @intCast(d * d);
-            } else {
-                if (d > nt) {
-                    total += @intCast(d);
-                }
+            }
+        }
+    } else {
+        var y: usize = 0;
+        while (y < h) : (y += 1) {
+            const prv_row = y * pixel_pitch_prev;
+            const cur_row = y * pixel_pitch_curr;
+            var x: usize = 0;
+            while (x < w) : (x += 1) {
+                const a: i64 = @intCast(prv_typed[prv_row + x]);
+                const b: i64 = @intCast(cur_typed[cur_row + x]);
+                const d: i64 = if (a > b) a - b else b - a;
                 total += @intCast(d);
+                if (d > nt) total += @intCast(d);
             }
         }
     }

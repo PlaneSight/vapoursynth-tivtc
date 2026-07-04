@@ -173,32 +173,28 @@ pub fn analyzeDiffMask(
 
         var x: usize = 3;
         while (x < w - 3) : (x += 1) {
-            // p-match noise: how much the p-match diff stands out vs. neighbors
             const pc_val: u64 = pc[x];
             apc += pc_val;
-
             if (pc_val > 3) {
-                const p_motion: u64 = if (pc_val > pp[x] and pc_val > pn[x] and pc_val > ppm1[x] and
+                if (pc_val > pp[x] and pc_val > pn[x] and pc_val > ppm1[x] and
                     pc_val > pcm1[x] and pc_val > pnm1[x] and pc_val > ppp1[x] and
-                    pc_val > pcp1[x] and pc_val > pnp1[x]) pc_val else 0;
-                apm += p_motion;
+                    pc_val > pcp1[x] and pc_val > pnp1[x])
+                {
+                    apm += pc_val;
+                }
                 apml += pc_val;
             }
-        }
-        // n-match: same analysis on the n-side diff map
-        {
-            var x2: usize = 3;
-            while (x2 < w - 3) : (x2 += 1) {
-                const nc_val: u64 = pn[x2];
-                anc += nc_val;
 
-                if (nc_val > 3) {
-                    const n_motion: u64 = if (nc_val > pp[x2] and nc_val > pc[x2] and nc_val > ppm1[x2] and
-                        nc_val > pcm1[x2] and nc_val > pnm1[x2] and nc_val > ppp1[x2] and
-                        nc_val > pcp1[x2] and nc_val > pnp1[x2]) nc_val else 0;
-                    anm += n_motion;
-                    anml += nc_val;
+            const nc_val: u64 = pn[x];
+            anc += nc_val;
+            if (nc_val > 3) {
+                if (nc_val > pp[x] and nc_val > pc[x] and nc_val > ppm1[x] and
+                    nc_val > pcm1[x] and nc_val > pnm1[x] and nc_val > ppp1[x] and
+                    nc_val > pcp1[x] and nc_val > pnp1[x])
+                {
+                    anm += nc_val;
                 }
+                anml += nc_val;
             }
         }
     }

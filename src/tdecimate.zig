@@ -163,16 +163,7 @@ pub fn tdecimateGetFrame(
     const idx = common.clampFrame(src_n, d.nfrms);
     const src = zapi.initZFrame(d.node, idx);
     defer src.deinit();
-    const dst = src.newVideoFrame();
-    var plane: u32 = 0;
-    while (plane < d.vi.format.numPlanes) : (plane += 1) {
-        var sp = src.getReadSlice(plane);
-        var dp = dst.getWriteSlice(plane);
-        const w, const h, const s = src.getDimensions(plane);
-        var y: u32 = 0;
-        while (y < h) : (y += 1) { @memcpy(dp[0..w], sp[0..w]); dp = dp[s..]; sp = sp[s..]; }
-    }
-    return dst.frame;
+    return src.addFrameRef().frame;
 }
 
 fn tdecimateGetFrameMode01(
@@ -298,22 +289,7 @@ fn tdecimateGetFrameMode01(
     const src = zapi.initZFrame(d.node, frame_idx);
     defer src.deinit();
 
-    const dst = src.newVideoFrame();
-
-    var plane: u32 = 0;
-    while (plane < d.vi.format.numPlanes) : (plane += 1) {
-        var srcp = src.getReadSlice(plane);
-        var dstp = dst.getWriteSlice(plane);
-        const w, const h, const stride = src.getDimensions(plane);
-        var y: u32 = 0;
-        while (y < h) : (y += 1) {
-            @memcpy(dstp[0..w], srcp[0..w]);
-            dstp = dstp[stride..];
-            srcp = srcp[stride..];
-        }
-    }
-
-    return dst.frame;
+    return src.addFrameRef().frame;
 }
 
 // ---------------------------------------------------------------------------
@@ -350,22 +326,7 @@ fn tdecimateGetFrameMode2(
 
     const src = zapi.initZFrame(d.node, frame_idx);
     defer src.deinit();
-    const dst = src.newVideoFrame();
-
-    var plane: u32 = 0;
-    while (plane < d.vi.format.numPlanes) : (plane += 1) {
-        var srcp = src.getReadSlice(plane);
-        var dstp = dst.getWriteSlice(plane);
-        const w, const h, const stride = src.getDimensions(plane);
-        var y: u32 = 0;
-        while (y < h) : (y += 1) {
-            @memcpy(dstp[0..w], srcp[0..w]);
-            dstp = dstp[stride..];
-            srcp = srcp[stride..];
-        }
-    }
-
-    return dst.frame;
+    return src.addFrameRef().frame;
 }
 
 // ---------------------------------------------------------------------------
