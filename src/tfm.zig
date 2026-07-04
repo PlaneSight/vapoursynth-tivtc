@@ -129,6 +129,75 @@ pub const SceneChangeTrack = struct {
 // GetFrame callback
 // ---------------------------------------------------------------------------
 
+/// Check if a woven frame is combed. Returns 2 if combed, 0 if clean.
+fn checkCombedFrame(
+    d: *TFM,
+    zapi: *const ZAPI,
+    frame: ?*vs.Frame,
+    np: i32,
+    mics: *[5]i32,
+    blockN: *[5]i32,
+    match: i32,
+) i32 {
+    if (d.cmask) |cmf| {
+        // Analyze comb mask
+        {
+            var plane_i: u32 = 0;
+            while (plane_i < np and (plane_i < 1 or d.chroma)) : (plane_i += 1) {
+                const src_rop = zapi.getReadPtr(frame, @intCast(plane_i));
+                const cmk_rwp = zapi.getWritePtr(cmf, @intCast(plane_i));
+                const src_pitch = zapi.getStride(frame, @intCast(plane_i));
+                const cmk_pitch = zapi.getStride(cmf, @intCast(plane_i));
+                const w: u32 = @intCast(zapi.getFrameWidth(frame, @intCast(plane_i)));
+                const h: u32 = @intCast(zapi.getFrameHeight(frame, @intCast(plane_i)));
+                if (d.vi.format.bytesPerSample == 1) {
+                    tfm_core.analyzeCombMask(u8, src_rop, cmk_rwp, w, h, src_pitch, cmk_pitch, d.cthresh);
+                } else {
+                    tfm_core.analyzeCombMask(u16, src_rop, cmk_rwp, w, h, src_pitch, cmk_pitch, d.cthresh);
+                }
+            }
+        }
+
+        // Apply y0/y1 exclusion
+        if (d.y0 != 0 or d.y1 != 0) {
+            var plane_i: u32 = 0;
+            while (plane_i < np) : (plane_i += 1) {
+                var y0_p: u32 = @intCast(d.y0);
+                var y1_p: u32 = @intCast(d.y1);
+                if (plane_i > 0 and d.vi.format.subSamplingH > 0) {
+                    y0_p >>= @intCast(d.vi.format.subSamplingH);
+                    y1_p >>= @intCast(d.vi.format.subSamplingH);
+                }
+                const fh: i32 = zapi.getFrameHeight(cmf, @intCast(plane_i));
+                if (@as(i32, @intCast(y1_p)) > fh) y1_p = @intCast(fh);
+                const cmk_pitch = zapi.getStride(cmf, @intCast(plane_i));
+                const cmkp = zapi.getWritePtr(cmf, @intCast(plane_i));
+                const row_len: usize = @intCast(cmk_pitch);
+                var yr: u32 = y0_p;
+                while (yr < y1_p) : (yr += 1) {
+                    @memset(cmkp[@as(usize, @intCast(yr)) * row_len ..][0..row_len], 0);
+                }
+            }
+        }
+
+        // Count comb blocks
+        if (d.c_array) |ca| {
+            const cmkp = zapi.getWritePtr(cmf, 0);
+            const cmk_pitch = zapi.getStride(cmf, 0);
+            const cw: u32 = @intCast(zapi.getFrameWidth(cmf, 0));
+            const ch: u32 = @intCast(zapi.getFrameHeight(cmf, 0));
+            const result = tfm_core.countCombBlocks(cmkp, cmk_pitch, ca, cw, ch,
+                d.xhalf, d.yhalf, d.xshift, d.yshift, d.mi);
+            mics[@intCast(match)] = result.mic_value;
+            blockN[@intCast(match)] = result.block_n;
+            return if (result.combed) @as(i32, 2) else @as(i32, 0);
+        }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+
 pub fn tfmGetFrame(
     n: c_int,
     activation_reason: vs.ActivationReason,
@@ -184,92 +253,143 @@ pub fn tfmGetFrame(
     const np = d.vi.format.numPlanes;
 
     // --- Field matching logic ---
-    // For mode=1: try match=c (1), fall back to p(0)/n(2) if combed
     const frstT: i32 = if ((field ^ order) != 0) 2 else 0;
     const scndT: i32 = if (field ^ order != 0) 3 else 2;
-    _ = frstT;
-    _ = scndT; // TODO: use in full field comparison
 
-    const fmatch: i32 = 1; // default: match c
-    var combed: i32 = 0;
+    var fmatch: i32 = 1; // default: match c
+    var combed: i32 = -1;
     var blockN: [5]i32 = [_]i32{common.SENTINEL} ** 5;
     var mics: [5]i32 = [_]i32{common.SENTINEL} ** 5;
     const d2vfilm = false;
-    
 
-    // Try field matching: weave with match=c, check combing
-    // If combed, try frstT (p or n depending on field/order)
-    {
-        var plane_i: u32 = 0;
-        while (plane_i < np) : (plane_i += 1) {
-            const dst_rwp = zapi.getWritePtr(dst.frame, @intCast(plane_i));
-            const src_rop = zapi.getReadPtr(src_frame.frame, @intCast(plane_i));
-            const prv_rop = zapi.getReadPtr(prv_frame.frame, @intCast(plane_i));
-            const nxt_rop = zapi.getReadPtr(nxt_frame.frame, @intCast(plane_i));
-            const dst_str = zapi.getStride(dst.frame, @intCast(plane_i));
-            const w = zapi.getFrameWidth(dst.frame, @intCast(plane_i));
-            const h = zapi.getFrameHeight(dst.frame, @intCast(plane_i));
+    // Modes 0-5: field matching with mode-specific fallback logic
+    if (d.mode == 0) {
+        // Mode 0: straight match c, no fallback, no comb detection
+        fmatch = 1;
+    } else {
+        // Modes 1-5: try c first, then fall back based on mode
+        fmatch = 1;
 
-            tfm_core.weaveFrame(u8, dst_rwp, src_rop, prv_rop, nxt_rop,
-                dst_str, @intCast(w), @intCast(h), fmatch, field, bytes_per_sample);
+        // Weave with match=c
+        {
+            var plane_i: u32 = 0;
+            while (plane_i < np) : (plane_i += 1) {
+                const dst_rwp = zapi.getWritePtr(dst.frame, @intCast(plane_i));
+                const src_rop = zapi.getReadPtr(src_frame.frame, @intCast(plane_i));
+                const prv_rop = zapi.getReadPtr(prv_frame.frame, @intCast(plane_i));
+                const nxt_rop = zapi.getReadPtr(nxt_frame.frame, @intCast(plane_i));
+                const dst_str = zapi.getStride(dst.frame, @intCast(plane_i));
+                const wu: u32 = @intCast(zapi.getFrameWidth(dst.frame, @intCast(plane_i)));
+                const hu: u32 = @intCast(zapi.getFrameHeight(dst.frame, @intCast(plane_i)));
+                tfm_core.weaveFrame(u8, dst_rwp, src_rop, prv_rop, nxt_rop, dst_str, wu, hu, fmatch, field, bytes_per_sample);
+            }
         }
-    }
 
-    // Comb detection on the woven frame
-    if (d.pp > 0 or d.mode > 0) {
-        combed = 0;
-        if (d.cmask) |cmf| {
-            // Analyze comb mask on the dst frame
-            {
-                var plane_i: u32 = 0;
-                while (plane_i < np and (plane_i < 1 or d.chroma)) : (plane_i += 1) {
-                    const src_rop = zapi.getReadPtr(dst.frame, @intCast(plane_i));
-                    const cmk_rwp = zapi.getWritePtr(cmf, @intCast(plane_i));
-                    const src_pitch = zapi.getStride(dst.frame, @intCast(plane_i));
-                    const cmk_pitch = zapi.getStride(cmf, @intCast(plane_i));
-                    const w = zapi.getFrameWidth(dst.frame, @intCast(plane_i));
-                    const h = zapi.getFrameHeight(dst.frame, @intCast(plane_i));
-                    const cthresh_scaled = d.cthresh;
+        // Check combing on match=c (all modes > 0)
+        if (d.mode > 0 and d.pp > 0) {
+            combed = checkCombedFrame(d, &zapi, dst.frame, np, &mics, &blockN, fmatch);
+        }
 
-                    if (bytes_per_sample == 1) {
-                        tfm_core.analyzeCombMask(u8, src_rop, cmk_rwp, @intCast(w), @intCast(h), src_pitch, cmk_pitch, cthresh_scaled);
+        // Mode-specific fallback when match=c is combed
+        if (combed == 2 and d.mode > 0) {
+            if (d.mode == 1 or d.mode == 5) {
+                // Try frstT (p or n) as fallback
+                const fallback_m = frstT;
+                {
+                    var plane_i: u32 = 0;
+                    while (plane_i < np) : (plane_i += 1) {
+                        const dst_rwp = zapi.getWritePtr(dst.frame, @intCast(plane_i));
+                        const src_rop = zapi.getReadPtr(src_frame.frame, @intCast(plane_i));
+                        const prv_rop = zapi.getReadPtr(prv_frame.frame, @intCast(plane_i));
+                        const nxt_rop = zapi.getReadPtr(nxt_frame.frame, @intCast(plane_i));
+                        const dst_str = zapi.getStride(dst.frame, @intCast(plane_i));
+                        const wu: u32 = @intCast(zapi.getFrameWidth(dst.frame, @intCast(plane_i)));
+                        const hu: u32 = @intCast(zapi.getFrameHeight(dst.frame, @intCast(plane_i)));
+                        tfm_core.weaveFrame(u8, dst_rwp, src_rop, prv_rop, nxt_rop, dst_str, wu, hu, fallback_m, field, bytes_per_sample);
+                    }
+                }
+                const fallback_combed = checkCombedFrame(d, &zapi, dst.frame, np, &mics, &blockN, fallback_m);
+                if (fallback_combed == 0) {
+                    fmatch = fallback_m;
+                    combed = 0;
+                }
+            } else if (d.mode == 2) {
+                // Try scndT (u) as fallback
+                const fallback_m = scndT;
+                {
+                    var plane_i: u32 = 0;
+                    while (plane_i < np) : (plane_i += 1) {
+                        const dst_rwp = zapi.getWritePtr(dst.frame, @intCast(plane_i));
+                        const src_rop = zapi.getReadPtr(src_frame.frame, @intCast(plane_i));
+                        const prv_rop = zapi.getReadPtr(prv_frame.frame, @intCast(plane_i));
+                        const nxt_rop = zapi.getReadPtr(nxt_frame.frame, @intCast(plane_i));
+                        const dst_str = zapi.getStride(dst.frame, @intCast(plane_i));
+                        const wu: u32 = @intCast(zapi.getFrameWidth(dst.frame, @intCast(plane_i)));
+                        const hu: u32 = @intCast(zapi.getFrameHeight(dst.frame, @intCast(plane_i)));
+                        tfm_core.weaveFrame(u8, dst_rwp, src_rop, prv_rop, nxt_rop, dst_str, wu, hu, fallback_m, field, bytes_per_sample);
+                    }
+                }
+                const fallback_combed = checkCombedFrame(d, &zapi, dst.frame, np, &mics, &blockN, fallback_m);
+                if (fallback_combed == 0) {
+                    fmatch = fallback_m;
+                    combed = 0;
+                }
+            } else if (d.mode == 3 or d.mode == 4) {
+                // Try frstT first, then scndT as second fallback
+                {
+                    const first_fb = frstT;
+                    var plane_i: u32 = 0;
+                    while (plane_i < np) : (plane_i += 1) {
+                        const dst_rwp = zapi.getWritePtr(dst.frame, @intCast(plane_i));
+                        const src_rop = zapi.getReadPtr(src_frame.frame, @intCast(plane_i));
+                        const prv_rop = zapi.getReadPtr(prv_frame.frame, @intCast(plane_i));
+                        const nxt_rop = zapi.getReadPtr(nxt_frame.frame, @intCast(plane_i));
+                        const dst_str = zapi.getStride(dst.frame, @intCast(plane_i));
+                        const wu: u32 = @intCast(zapi.getFrameWidth(dst.frame, @intCast(plane_i)));
+                        const hu: u32 = @intCast(zapi.getFrameHeight(dst.frame, @intCast(plane_i)));
+                        tfm_core.weaveFrame(u8, dst_rwp, src_rop, prv_rop, nxt_rop, dst_str, wu, hu, first_fb, field, bytes_per_sample);
+                    }
+                }
+                const fb1_combed = checkCombedFrame(d, &zapi, dst.frame, np, &mics, &blockN, frstT);
+                if (fb1_combed == 0) {
+                    fmatch = frstT;
+                    combed = 0;
+                } else {
+                    {
+                        const second_fb = scndT;
+                        var plane_i: u32 = 0;
+                        while (plane_i < np) : (plane_i += 1) {
+                            const dst_rwp = zapi.getWritePtr(dst.frame, @intCast(plane_i));
+                            const src_rop = zapi.getReadPtr(src_frame.frame, @intCast(plane_i));
+                            const prv_rop = zapi.getReadPtr(prv_frame.frame, @intCast(plane_i));
+                            const nxt_rop = zapi.getReadPtr(nxt_frame.frame, @intCast(plane_i));
+                            const dst_str = zapi.getStride(dst.frame, @intCast(plane_i));
+                            const wu: u32 = @intCast(zapi.getFrameWidth(dst.frame, @intCast(plane_i)));
+                            const hu: u32 = @intCast(zapi.getFrameHeight(dst.frame, @intCast(plane_i)));
+                            tfm_core.weaveFrame(u8, dst_rwp, src_rop, prv_rop, nxt_rop, dst_str, wu, hu, second_fb, field, bytes_per_sample);
+                        }
+                    }
+                    const fb2_combed = checkCombedFrame(d, &zapi, dst.frame, np, &mics, &blockN, scndT);
+                    if (fb2_combed == 0) {
+                        fmatch = scndT;
+                        combed = 0;
                     }
                 }
             }
+        }
 
-            // Apply y0/y1 exclusion band
-            if (d.y0 != 0 or d.y1 != 0) {
-                var plane_i: u32 = 0;
-                while (plane_i < np) : (plane_i += 1) {
-                    var y0_plane: u32 = @intCast(d.y0);
-                    var y1_plane: u32 = @intCast(d.y1);
-                    if (plane_i > 0 and d.vi.format.subSamplingH > 0) {
-                        y0_plane >>= @intCast(d.vi.format.subSamplingH);
-                        y1_plane >>= @intCast(d.vi.format.subSamplingH);
-                    }
-                    const h = zapi.getFrameHeight(cmf, @intCast(plane_i));
-                    if (@as(i32, @intCast(y1_plane)) > h) y1_plane = @intCast(h);
-                    const cmk_pitch = zapi.getStride(cmf, @intCast(plane_i));
-                    const cmkp = zapi.getWritePtr(cmf, @intCast(plane_i));
-                    const row_len: usize = @intCast(cmk_pitch);
-                    var yr: u32 = y0_plane;
-                    while (yr < y1_plane) : (yr += 1) {
-                        @memset(cmkp[@as(usize, @intCast(yr)) * row_len ..][0..row_len], 0);
-                    }
-                }
-            }
-
-            // Count comb blocks
-            if (d.c_array) |ca| {
-                const cmkp = zapi.getWritePtr(cmf, 0);
-                const cmk_pitch = zapi.getStride(cmf, 0);
-                const w = zapi.getFrameWidth(cmf, 0);
-                const h = zapi.getFrameHeight(cmf, 0);
-                const result = tfm_core.countCombBlocks(cmkp, cmk_pitch, ca, @intCast(w), @intCast(h),
-                    d.xhalf, d.yhalf, d.xshift, d.yshift, d.mi);
-                mics[@intCast(fmatch)] = result.mic_value;
-                blockN[@intCast(fmatch)] = result.block_n;
-                if (result.combed) combed = 2;
+        // Re-weave with final match decision if it changed from c
+        if (fmatch != 1) {
+            var plane_i: u32 = 0;
+            while (plane_i < np) : (plane_i += 1) {
+                const dst_rwp = zapi.getWritePtr(dst.frame, @intCast(plane_i));
+                const src_rop = zapi.getReadPtr(src_frame.frame, @intCast(plane_i));
+                const prv_rop = zapi.getReadPtr(prv_frame.frame, @intCast(plane_i));
+                const nxt_rop = zapi.getReadPtr(nxt_frame.frame, @intCast(plane_i));
+                const dst_str = zapi.getStride(dst.frame, @intCast(plane_i));
+                const wu: u32 = @intCast(zapi.getFrameWidth(dst.frame, @intCast(plane_i)));
+                const hu: u32 = @intCast(zapi.getFrameHeight(dst.frame, @intCast(plane_i)));
+                tfm_core.weaveFrame(u8, dst_rwp, src_rop, prv_rop, nxt_rop, dst_str, wu, hu, fmatch, field, bytes_per_sample);
             }
         }
     }

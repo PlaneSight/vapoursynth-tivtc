@@ -349,7 +349,7 @@ pub fn analyzeCombMask(
     const pitch_us: usize = @intCast(cmk_pitch);
 
     var cmkp_bytes: [*]u8 = @ptrCast(cmkp);
-    const srcp_typed: [*]const T = @ptrCast(srcp);
+    const srcp_typed: [*]const T = @ptrCast(@alignCast(srcp));
 
     var srcppp: [*]const T = srcp_typed;
     var srcpp: [*]const T = srcp_typed;
