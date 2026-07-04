@@ -140,8 +140,11 @@ pub fn tdecimateGetFrame(
     if (d.mode < 2) {
         return tdecimateGetFrameMode01(d, nn, activation_reason, frame_data, frame_ctx, &zapi);
     }
+    if (d.mode == 2 or d.mode == 7) {
+        return tdecimateGetFrameMode2(d, nn, activation_reason, frame_ctx, &zapi);
+    }
 
-    // Modes 2-7: passthrough for now
+    // Modes 3-6: passthrough for now
     if (activation_reason == .Initial) {
         zapi.requestFrameFilter(nn, d.node);
         return null;
@@ -289,6 +292,58 @@ fn tdecimateGetFrameMode01(
     const src = zapi.initZFrame(d.node, frame_idx);
     defer src.deinit();
 
+    const dst = src.newVideoFrame();
+
+    var plane: u32 = 0;
+    while (plane < d.vi.format.numPlanes) : (plane += 1) {
+        var srcp = src.getReadSlice(plane);
+        var dstp = dst.getWriteSlice(plane);
+        const w, const h, const stride = src.getDimensions(plane);
+        var y: u32 = 0;
+        while (y < h) : (y += 1) {
+            @memcpy(dstp[0..w], srcp[0..w]);
+            dstp = dstp[stride..];
+            srcp = srcp[stride..];
+        }
+    }
+
+    return dst.frame;
+}
+
+// ---------------------------------------------------------------------------
+// Mode 2/7: arbitrary framerate decimation
+// ---------------------------------------------------------------------------
+
+fn tdecimateGetFrameMode2(
+    d: *TDecimate,
+    n: i32,
+    activation_reason: vs.ActivationReason,
+    frame_ctx: ?*vs.FrameContext,
+    zapi: *const ZAPI,
+) ?*const vs.Frame {
+    _ = frame_ctx;
+
+    if (activation_reason == .Initial) {
+        const vi_nfrms: i32 = @intCast(d.vi_child.numFrames);
+        const cycle = d.cycle_size;
+        const start: i32 = common.clampFrame(n - cycle * 2, vi_nfrms - 1);
+        const end: i32 = common.clampFrame(n + cycle * 2, vi_nfrms - 1);
+        var i: i32 = start;
+        while (i <= end) : (i += 1) {
+            zapi.requestFrameFilter(i, d.node);
+        }
+        return null;
+    }
+
+    if (activation_reason != .AllFramesReady) return null;
+
+    const input_fps: f64 = @as(f64, @floatFromInt(d.vi_child.fpsNum)) / @as(f64, @floatFromInt(d.vi_child.fpsDen));
+    const dec_ratio = input_fps / d.rate;
+    const src_n: i32 = @intFromFloat(@round(@as(f64, @floatFromInt(n)) * dec_ratio));
+    const frame_idx = common.clampFrame(src_n, d.nfrms);
+
+    const src = zapi.initZFrame(d.node, frame_idx);
+    defer src.deinit();
     const dst = src.newVideoFrame();
 
     var plane: u32 = 0;
