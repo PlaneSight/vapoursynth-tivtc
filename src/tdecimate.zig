@@ -144,27 +144,33 @@ pub fn tdecimateGetFrame(
         return tdecimateGetFrameMode2(d, nn, activation_reason, frame_ctx, &zapi);
     }
 
-    // Modes 3-6: passthrough for now
+    // Modes 3-6: basic decimation with framerate-ratio mapping
     if (activation_reason == .Initial) {
-        zapi.requestFrameFilter(nn, d.node);
+        const vi_nfrms: i32 = @intCast(d.vi_child.numFrames);
+        const start = common.clampFrame(n - d.cycle_size, vi_nfrms - 1);
+        const end = common.clampFrame(n + d.cycle_size, vi_nfrms - 1);
+        var i: i32 = start;
+        while (i <= end) : (i += 1) zapi.requestFrameFilter(i, d.node);
         return null;
     }
     if (activation_reason != .AllFramesReady) return null;
 
-    const src = zapi.initZFrame(d.node, nn);
+    const input_fps: f64 = @as(f64, @floatFromInt(d.vi_child.fpsNum)) / @as(f64, @floatFromInt(d.vi_child.fpsDen));
+    const src_n: i32 = if (d.mode == 4)
+        n // mode 4: metrics output, passthrough
+    else
+        @intFromFloat(@round(@as(f64, @floatFromInt(n)) * input_fps / d.rate));
+    const idx = common.clampFrame(src_n, d.nfrms);
+    const src = zapi.initZFrame(d.node, idx);
     defer src.deinit();
     const dst = src.newVideoFrame();
     var plane: u32 = 0;
     while (plane < d.vi.format.numPlanes) : (plane += 1) {
-        var srcp = src.getReadSlice(plane);
-        var dstp = dst.getWriteSlice(plane);
-        const w, const h, const stride = src.getDimensions(plane);
+        var sp = src.getReadSlice(plane);
+        var dp = dst.getWriteSlice(plane);
+        const w, const h, const s = src.getDimensions(plane);
         var y: u32 = 0;
-        while (y < h) : (y += 1) {
-            @memcpy(dstp[0..w], srcp[0..w]);
-            dstp = dstp[stride..];
-            srcp = srcp[stride..];
-        }
+        while (y < h) : (y += 1) { @memcpy(dp[0..w], sp[0..w]); dp = dp[s..]; sp = sp[s..]; }
     }
     return dst.frame;
 }
