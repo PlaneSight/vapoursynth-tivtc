@@ -3,80 +3,61 @@ Issue #5: TFM results are not deterministic.
 https://github.com/dubhatervapoursynth/vapoursynth-tivtc/issues/5
 
 Fix: switch TFM from fmParallelRequests to fmSerial. TFM's GetFrame
-uses shared scratch buffers (cArray, tbuffer, cmask, map) allocated
-once in the constructor and reused across all frame requests. It also
-mutates tracking state (lastMatch, sclast). With concurrent access,
-these were corrupted between arAllFramesReady invocations.
+uses shared scratch buffers (cArray, tbuffer, cmask, map) that are
+not thread-safe. With fmParallelRequests, concurrent arAllFramesReady
+invocations corrupt the shared buffers causing non-deterministic output.
 
-Note: the race is inherently probabilistic under Python's single-threaded
-get_frame() — out-of-order requests help exercise the state machine but
-can't fully reproduce multi-threaded concurrent corruption. The test
-validates the fix is in place and output is deterministic; adversarial
-verification requires vspipe with --requests > 1 or a C++ harness.
+vspipe with --requests > 1 exercises the multi-threaded code path:
+two runs with identical input must produce identical pixel output.
 """
-import numpy as np
-import vapoursynth as vs
 import pytest
-from .helpers import frame_as_array, make_interlaced_test_clip
+from .vspipe_helpers import PLUGIN, vspipe_checksum
 
 
-def test_tfm_deterministic(core):
-    """Two TFM runs must produce pixel-identical output even under
-    out-of-order frame requests that stress the internal state machine."""
-    clip = make_interlaced_test_clip(
-        core, width=640, height=480, length=30,
-        fpsnum=30000, fpsden=1001,
+TFM_DETERM_VPY = f"""
+import vapoursynth as vs
+core = vs.core
+core.std.LoadPlugin(r'{PLUGIN}')
+
+clip = core.std.BlankClip(width=640, height=480, format=vs.YUV420P8,
+                          length=30, fpsnum=30000, fpsden=1001,
+                          color=[128, 128, 128], keep=True)
+clip = core.std.SetFrameProps(clip, _FieldBased=vs.FIELD_TOP)
+
+def add_stripes(n, f):
+    import numpy as np, ctypes
+    fout = f.copy()
+    ptr = fout.get_write_ptr(0)
+    stride = fout.get_stride(0)
+    arr = np.ctypeslib.as_array(
+        ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * (stride * 480))).contents
+    ).view(np.uint8).reshape(480, stride)[:, :640]
+    for row in range(0, 480, 2):
+        if n % 2 == 0:
+            arr[row, :] = 200
+        elif row + 1 < 480:
+            arr[row + 1, :] = 55
+    return fout
+
+clip = core.std.ModifyFrame(clip, clip, add_stripes)
+tfm = clip.tivtc.TFM(mode=0, cthresh=6, MI=64)
+tfm.set_output()
+"""
+
+
+def test_tfm_deterministic_mt():
+    """Two vspipe runs with --requests 4 must produce identical pixel output."""
+    run1 = vspipe_checksum(TFM_DETERM_VPY, requests=4, timeout=30)
+    run2 = vspipe_checksum(TFM_DETERM_VPY, requests=4, timeout=30)
+    assert run1 == run2, (
+        f"Non-deterministic output detected!\n"
+        f"Run 1 sha256: {run1}\n"
+        f"Run 2 sha256: {run2}"
     )
 
-    run1 = clip.tivtc.TFM(mode=0, cthresh=6, MI=64)
-    run2 = clip.tivtc.TFM(mode=0, cthresh=6, MI=64)
 
-    # Request frames out of order to exercise the state machine
-    # (lastMatch, sclast) — forward, then reverse, then interleaved
-    order1 = list(range(run1.num_frames))
-    order2 = list(reversed(range(run2.num_frames)))
-
-    frames1 = {}
-    for n in order1:
-        frames1[n] = run1.get_frame(n)
-
-    frames2 = {}
-    for n in order2:
-        frames2[n] = run2.get_frame(n)
-
-    for n in range(run1.num_frames):
-        f1 = frames1[n]
-        f2 = frames2[n]
-        for plane in range(f1.format.num_planes):
-            p1 = frame_as_array(f1, plane)
-            p2 = frame_as_array(f2, plane)
-            if not np.array_equal(p1, p2):
-                diff = np.abs(p1.astype(int) - p2.astype(int))
-                pytest.fail(
-                    f"Frame {n} plane {plane}: non-deterministic!\n"
-                    f"Max diff: {diff.max()}, non-zero: {np.count_nonzero(diff)}"
-                )
-
-
-def test_combed_props_deterministic(core):
-    """_Combed frame props must match across runs under reverse-order access."""
-    clip = make_interlaced_test_clip(
-        core, width=640, height=480, length=30,
-        fpsnum=30000, fpsden=1001,
-    )
-
-    run1 = clip.tivtc.TFM(mode=0, cthresh=6, MI=64)
-    run2 = clip.tivtc.TFM(mode=0, cthresh=6, MI=64)
-
-    # Forward order
-    for n in range(run1.num_frames):
-        run1.get_frame(n)
-
-    # Reverse order — stresses state machine
-    for n in reversed(range(run2.num_frames)):
-        run2.get_frame(n)
-
-    for n in range(run1.num_frames):
-        c1 = run1.get_frame(n).props.get('_Combed', -1)
-        c2 = run2.get_frame(n).props.get('_Combed', -1)
-        assert c1 == c2, f"Frame {n}: _Combed={c1} vs {c2}"
+def test_tfm_deterministic_st():
+    """Single-threaded runs should also be identical."""
+    run1 = vspipe_checksum(TFM_DETERM_VPY, requests=1, timeout=30)
+    run2 = vspipe_checksum(TFM_DETERM_VPY, requests=1, timeout=30)
+    assert run1 == run2

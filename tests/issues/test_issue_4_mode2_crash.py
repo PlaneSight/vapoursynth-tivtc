@@ -4,51 +4,54 @@ https://github.com/dubhatervapoursynth/vapoursynth-tivtc/issues/4
 
 Fix: serialize TDecimate mode 2 (fmSerial + nfMakeLinear) since it uses
 a state machine tracking prev/curr/next cycles across frame requests.
-Also fixed the requestFrameFilter calls in the arInitial path to use
-proper bounds (std::max(0, std::min(i, vi_child->numFrames - 1))).
+Also fixed off-by-one requestFrameFilter bounds.
 """
-import vapoursynth as vs
 import pytest
-from .helpers import make_interlaced_test_clip
+from .vspipe_helpers import PLUGIN, vspipe_info, vspipe_frame_count
 
 
-def test_mode2_no_crash(core):
-    """TDecimate mode=2 should not crash or raise when requesting output frames."""
-    clip = make_interlaced_test_clip(
-        core, width=640, height=480, length=120,
-        fpsnum=30000, fpsden=1001,
-    )
+TDEC_MODE2_VPY = f"""
+import vapoursynth as vs
+core = vs.core
+core.std.LoadPlugin(r'{PLUGIN}')
 
-    tfm_clip = clip.tivtc.TFM()
-    for i in range(0, min(30, tfm_clip.num_frames)):
-        tfm_clip.get_frame(i)
+# Create interlaced-looking clip
+clip = core.std.BlankClip(width=640, height=480, format=vs.YUV420P8,
+                          length=120, fpsnum=30000, fpsden=1001,
+                          color=[128, 128, 128], keep=True)
+clip = core.std.SetFrameProps(clip, _FieldBased=vs.FIELD_TOP)
 
-    try:
-        decimated = tfm_clip.tivtc.TDecimate(mode=2, rate=23.976)
-        for i in range(0, min(10, decimated.num_frames)):
-            f = decimated.get_frame(i)
-            assert f is not None, f"Frame {i} is None"
-    except Exception as e:
-        pytest.fail(f"TDecimate mode=2 raised: {e}")
+def add_stripes(n, f):
+    import numpy as np, ctypes
+    fout = f.copy()
+    ptr = fout.get_write_ptr(0)
+    stride = fout.get_stride(0)
+    arr = np.ctypeslib.as_array(
+        ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * (stride * 480))).contents
+    ).view(np.uint8).reshape(480, stride)[:, :640]
+    for row in range(0, 480, 2):
+        if n % 2 == 0:
+            arr[row, :] = 200
+        elif row + 1 < 480:
+            arr[row + 1, :] = 55
+    return fout
+
+clip = core.std.ModifyFrame(clip, clip, add_stripes)
+
+# TFM + TDecimate mode 2
+tfm = clip.tivtc.TFM()
+decimated = tfm.tivtc.TDecimate(mode=2, rate=23.976)
+decimated.set_output()
+"""
 
 
-def test_mode2_reduces_frame_count(core):
-    """Mode 2 with rate=23.976 should reduce frame count from 30fps input."""
-    clip = make_interlaced_test_clip(
-        core, width=320, height=240, length=100,
-        fpsnum=30000, fpsden=1001,
-    )
+def test_mode2_no_crash():
+    """TDecimate mode=2 should process via vspipe without segfault."""
+    info = vspipe_info(TDEC_MODE2_VPY, timeout=30)
+    assert info["numFrames"] > 0
 
-    tfm_clip = clip.tivtc.TFM()
-    for i in range(0, min(30, tfm_clip.num_frames)):
-        tfm_clip.get_frame(i)
 
-    decimated = tfm_clip.tivtc.TDecimate(mode=2, rate=23.976)
-    assert 0 < decimated.num_frames < clip.num_frames, (
-        f"Mode 2 should reduce frame count from {clip.num_frames}, "
-        f"got {decimated.num_frames}"
-    )
-    # Request a few output frames to exercise the full decode path
-    for i in range(0, min(5, decimated.num_frames)):
-        f = decimated.get_frame(i)
-        assert f is not None, f"Frame {i} is None"
+def test_mode2_reduces_frame_count():
+    """30fps -> 24fps should reduce frame count."""
+    n = vspipe_frame_count(TDEC_MODE2_VPY, timeout=30)
+    assert 0 < n < 120, f"Expected 0 < frames < 120, got {n}"

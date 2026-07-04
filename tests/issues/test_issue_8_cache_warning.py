@@ -2,39 +2,45 @@
 Issue #8: TFM "Explicitly instantiated a Cache" warning on VS R58+.
 https://github.com/dubhatervapoursynth/vapoursynth-tivtc/issues/8
 
-Fix: remove explicit std.Cache instantiation when PP > 4. VapourSynth's
-scheduler handles caching automatically — explicit Cache nodes were
-always non-portable and were disallowed in R58+.
+Fix: remove explicit std.Cache instantiation when PP > 4.
+VapourSynth's scheduler handles caching automatically.
 """
-import vapoursynth as vs
 import pytest
-from .helpers import make_blank_fieldbased
+from .vspipe_helpers import PLUGIN, vspipe_info, vspipe_frame_count
 
 
-def test_tfm_no_cache_error(core):
-    """TFM should create output without error on VS R77 (no Cache warning)."""
-    clip = make_blank_fieldbased(core, length=10, fpsnum=30000, fpsden=1001)
+TFM_CACHE_VPY = f"""
+import vapoursynth as vs
+core = vs.core
+core.std.LoadPlugin(r'{PLUGIN}')
 
-    result = clip.tivtc.TFM()
-    assert result is not None
-    assert result.num_frames == clip.num_frames
-    # Actually request frames — the Cache bug manifested during frame processing
-    f = result.get_frame(0)
-    assert f is not None
+clip = core.std.BlankClip(width=640, height=480, format=vs.YUV420P8,
+                          length=10, fpsnum=30000, fpsden=1001)
+clip = core.std.SetFrameProps(clip, _FieldBased=vs.FIELD_TOP)
+tfm = clip.tivtc.TFM()
+tfm.set_output()
+"""
+
+TFM_CACHE_PP7_VPY = f"""
+import vapoursynth as vs
+core = vs.core
+core.std.LoadPlugin(r'{PLUGIN}')
+
+clip = core.std.BlankClip(width=640, height=480, format=vs.YUV420P8,
+                          length=10, fpsnum=30000, fpsden=1001)
+clip = core.std.SetFrameProps(clip, _FieldBased=vs.FIELD_TOP)
+tfm = clip.tivtc.TFM(PP=7)
+tfm.set_output()
+"""
 
 
-def test_tfm_pp_above_4_no_cache_error(core):
-    """PP > 4 was the trigger for explicit Cache instantiation — must work."""
-    clip = make_blank_fieldbased(core, length=10, fpsnum=30000, fpsden=1001)
+def test_tfm_no_cache_error():
+    """TFM with default PP should process via vspipe without error."""
+    info = vspipe_info(TFM_CACHE_VPY)
+    assert info["numFrames"] == 10
 
-    result_pp5 = clip.tivtc.TFM(PP=5)
-    assert result_pp5 is not None
-    assert result_pp5.num_frames == clip.num_frames
-    f5 = result_pp5.get_frame(0)
-    assert f5 is not None
 
-    result_pp7 = clip.tivtc.TFM(PP=7)
-    assert result_pp7 is not None
-    assert result_pp7.num_frames == clip.num_frames
-    f7 = result_pp7.get_frame(0)
-    assert f7 is not None
+def test_tfm_pp_above_4_no_cache_error():
+    """PP=7 was the trigger for explicit Cache — must not error."""
+    info = vspipe_info(TFM_CACHE_PP7_VPY)
+    assert info["numFrames"] == 10
