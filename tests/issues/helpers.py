@@ -59,8 +59,8 @@ def make_interlaced_test_clip(core, width=640, height=480, length=30,
         for row in range(0, arr.shape[0], 2):
             if n % 2 == 0:
                 arr[row, :] = 200
-            else:
-                arr[row + 1, :] = 55 if row + 1 < arr.shape[0] else None
+            elif row + 1 < arr.shape[0]:
+                arr[row + 1, :] = 55
         return fout
 
     return core.std.ModifyFrame(clip, clip, add_stripes)

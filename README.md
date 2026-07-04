@@ -118,7 +118,7 @@ clip = core.tivtc.TFM(clip=clip, order=1, mode=1, PP=6)
 | `TFMMatch` | int | Match type used: `0`=p, `1`=c, `2`=n, `3`=b, `4`=u, `5`=l, `6`=h |
 | `TFMMics` | int[] | MIC values for each match type (per‑block combing metric) |
 | `TFMDisplay` | data | Debug display string (when `display=True`) |
-| `_Combed` | int | `0` = not combed, `1` = forced clean, `2` = combed |
+| `_Combed` | int | `0` = not combed, `1` = combed |
 | `TFMD2VFilm` | int | D2V film flag |
 
 ---
