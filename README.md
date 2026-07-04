@@ -1,8 +1,20 @@
 # vapoursynth-tivtc
 
+> **Fork of [dubhatervapoursynth/vapoursynth-tivtc](https://github.com/dubhatervapoursynth/vapoursynth-tivtc)** with fixes for outstanding issues.
+
 Field matching (TFM) and decimation (TDecimate) filters for VapourSynth — a port of [tritical's TIVTC](https://github.com/pinterf/TIVTC) for AviSynth.
 
 Provides inverse telecine (IVTC) via field matching followed by decimation of duplicate frames.
+
+## Fixes applied
+
+- [#3](https://github.com/dubhatervapoursynth/vapoursynth-tivtc/issues/3) — **y0/y1 exclusion**: zero comb mask rows in the excluded band so head-switching noise etc. don't trigger combed-frame detection.
+- [#4](https://github.com/dubhatervapoursynth/vapoursynth-tivtc/issues/4) — **TDecimate mode 2 crash**: serialize the mode 2 state machine (`fmSerial` + `nfMakeLinear`) and fix off-by-one frame request bounds.
+- [#5](https://github.com/dubhatervapoursynth/vapoursynth-tivtc/issues/5) — **Non-deterministic output**: switch TFM from `fmParallelRequests` to `fmSerial` — shared scratch buffers and tracking state are not thread-safe.
+- [#8](https://github.com/dubhatervapoursynth/vapoursynth-tivtc/issues/8) — **Cache warning on VS R58+**: remove explicit `std.Cache` instantiation; VapourSynth's scheduler handles caching automatically.
+- High-bit-depth mask support and ARM (aarch64) builds.
+
+Reproducible regression tests under [`tests/issues/`](tests/issues/).
 
 ## Build
 
@@ -20,7 +32,14 @@ ninja -C build
 sudo ninja -C build install
 ```
 
-Only x86/x86_64 targets are currently supported.
+### ARM (aarch64) — macOS / Linux
+
+```sh
+meson setup build
+ninja -C build
+```
+
+ARM builds use C-only code paths with SSE intrinsic stubs from `vendor/include_arm/`. Set `-DUSE_C_NO_ASM` is automatic via meson.
 
 ---
 
