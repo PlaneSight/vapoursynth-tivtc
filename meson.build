@@ -13,7 +13,6 @@ warnings = [
 cflags = [
   warnings,
   '-fvisibility=hidden',
-  '-I' + meson.source_root() + '/vendor/include',
 ]
 
 ldflags = [
@@ -23,8 +22,12 @@ host_cpu_family = host_machine.cpu_family()
 
 if host_cpu_family.startswith('x86')
   cflags += ['-mfpmath=sse', '-msse2', '-DVS_TARGET_CPU_X86=1']
+  cflags += ['-I' + meson.source_root() + '/vendor/include']
 else
-  message('Building without SIMD assembly (x86-only ASM sources excluded)')
+  message('ARM build: using SSE stub headers')
+  cflags += ['-DUSE_C_NO_ASM']
+  cflags += ['-I' + meson.source_root() + '/vendor/include_arm']
+  cflags += ['-I' + meson.source_root() + '/vendor/include']  # for VSHelper.h, VapourSynth.h
 endif
 
 host_system = host_machine.system()
@@ -78,7 +81,7 @@ asm_sources = [
 if host_cpu_family.startswith('x86')
   sources = common_sources + asm_sources
 else
-  sources = common_sources
+  sources = common_sources + asm_sources  # ARM: include all, SSE guarded by USE_C_NO_ASM
 endif
 
 deps = [
